@@ -1,0 +1,10 @@
+__pycache__/
+.DS_Store
+*.pyc
+results/
+data/
+*.tif
+*.tiff
+*.png
+*.csv
+*.xlsx
