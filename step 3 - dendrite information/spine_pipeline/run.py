@@ -61,7 +61,7 @@ def main() -> int:
 if __name__ == "__main__":
     import sys
 
-    _step2 = Path(__file__).resolve().parent.parent
-    if str(_step2) not in sys.path:
-        sys.path.insert(0, str(_step2))
+    _step3 = Path(__file__).resolve().parent.parent
+    if str(_step3) not in sys.path:
+        sys.path.insert(0, str(_step3))
     raise SystemExit(main())

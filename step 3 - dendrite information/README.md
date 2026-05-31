@@ -1,4 +1,4 @@
-# Step 2 — Dendrite information (spine summary pipeline)
+# Step 3 — Dendrite information (spine summary pipeline)
 
 Builds spine registry tables and per-dendrite density from RESPAN + annotator exports.
 
@@ -8,7 +8,7 @@ Open a terminal in your animal **`respan`** folder (where `pre-droplet/`, `resul
 
 ```cmd
 cd /d "E:\...\GP04\respan"
-python "D:\learning_project_spines\code final\step 2 - dendrite information\run.py"
+python "D:\learning_project_spines\code final\step 3 - dendrite information\run.py"
 ```
 
 ## Input / output

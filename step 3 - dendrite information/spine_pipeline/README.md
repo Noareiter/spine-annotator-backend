@@ -6,7 +6,7 @@ All spine-summary code lives in this folder.
 
 ```cmd
 cd /d "E:\...\GP04\respan"
-python "d:\learning_project_spines\scripts\spine_pipeline\run.py"
+python "D:\learning_project_spines\code final\step 3 - dendrite information\run.py"
 ```
 
 Or from `scripts/`:
