@@ -36,6 +36,11 @@ class LoadedSession:
     removed_t2_ids: Set[str] = field(default_factory=set)
     ignored_t1_ids: Set[str] = field(default_factory=set)
     ignored_t2_ids: Set[str] = field(default_factory=set)
+    # Unlinked-dendrite spines the user has visually acknowledged in Final Spine Step.
+    reviewed_unlinked_t1_ids: Set[str] = field(default_factory=set)
+    reviewed_unlinked_t2_ids: Set[str] = field(default_factory=set)
+    # Optional explicit QC on unlinked spines: key "t1:<id>" / "t2:<id>" -> "artifact" | "ignore".
+    unlinked_spine_dispositions: Dict[str, str] = field(default_factory=dict)
     manual_t2_click_spines: List[Dict[str, object]] = field(default_factory=list)
     manual_t1_click_spines: List[Dict[str, object]] = field(default_factory=list)
     manual_click_matches: List[Dict[str, object]] = field(default_factory=list)

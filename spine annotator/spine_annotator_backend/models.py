@@ -391,6 +391,36 @@ class ReviewCountersResponse(BaseModel):
     max_match_z_gap: float = 7.0
 
 
+class CleanupQueueItem(BaseModel):
+    timepoint: Timepoint
+    spine_id: str
+    x: float
+    y: float
+    z: float
+    nearest_other_timepoint_spine_id: Optional[str] = None
+    is_unlinked_dendrite: bool = False
+    dendrite_id: Optional[str] = None
+
+
+class CleanupQueueResponse(BaseModel):
+    total_unclassified: int
+    unreviewed_unlinked_count: int = 0
+    queueable_count: int = 0
+    orphan_ids: List[str] = Field(default_factory=list)
+    items: List[CleanupQueueItem]
+
+
+class CleanupClassifyRequest(BaseModel):
+    timepoint: Timepoint
+    spine_id: str
+    classification: Literal["new", "lost", "artifact", "ignore", "reviewed"]
+
+
+class CleanupClassifyResponse(BaseModel):
+    ok: bool
+    message: str
+
+
 class ExportResultsResponse(BaseModel):
     ok: bool
     output_dir: str

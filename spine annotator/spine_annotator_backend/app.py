@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import copy
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import List
@@ -93,6 +94,9 @@ def _save_last_session() -> None:
         "removed_t2_ids": sorted(list(session.removed_t2_ids)),
         "ignored_t1_ids": sorted(list(session.ignored_t1_ids)),
         "ignored_t2_ids": sorted(list(session.ignored_t2_ids)),
+        "reviewed_unlinked_t1_ids": sorted(list(session.reviewed_unlinked_t1_ids)),
+        "reviewed_unlinked_t2_ids": sorted(list(session.reviewed_unlinked_t2_ids)),
+        "unlinked_spine_dispositions": dict(session.unlinked_spine_dispositions),
         "manual_t2_click_spines": session.manual_t2_click_spines,
         "manual_t1_click_spines": session.manual_t1_click_spines,
         "manual_click_matches": session.manual_click_matches,
@@ -123,6 +127,9 @@ def _restore_previous_saved_session() -> tuple[models.SelectFilesResponse, model
     session.removed_t2_ids = set(str(x) for x in raw.get("removed_t2_ids", []))
     session.ignored_t1_ids = set(str(x) for x in raw.get("ignored_t1_ids", []))
     session.ignored_t2_ids = set(str(x) for x in raw.get("ignored_t2_ids", []))
+    session.reviewed_unlinked_t1_ids = set(str(x) for x in raw.get("reviewed_unlinked_t1_ids", []))
+    session.reviewed_unlinked_t2_ids = set(str(x) for x in raw.get("reviewed_unlinked_t2_ids", []))
+    session.unlinked_spine_dispositions = dict(raw.get("unlinked_spine_dispositions", {}))
     session.manual_t2_click_spines = list(raw.get("manual_t2_click_spines", []))
     session.manual_t1_click_spines = list(raw.get("manual_t1_click_spines", []))
     session.manual_click_matches = list(raw.get("manual_click_matches", []))
@@ -159,6 +166,9 @@ def _restore_last_session() -> tuple[models.SelectFilesResponse, models.SessionS
     session.removed_t2_ids = set(str(x) for x in raw.get("removed_t2_ids", []))
     session.ignored_t1_ids = set(str(x) for x in raw.get("ignored_t1_ids", []))
     session.ignored_t2_ids = set(str(x) for x in raw.get("ignored_t2_ids", []))
+    session.reviewed_unlinked_t1_ids = set(str(x) for x in raw.get("reviewed_unlinked_t1_ids", []))
+    session.reviewed_unlinked_t2_ids = set(str(x) for x in raw.get("reviewed_unlinked_t2_ids", []))
+    session.unlinked_spine_dispositions = dict(raw.get("unlinked_spine_dispositions", {}))
     session.manual_t2_click_spines = list(raw.get("manual_t2_click_spines", []))
     session.manual_t1_click_spines = list(raw.get("manual_t1_click_spines", []))
     session.manual_click_matches = list(raw.get("manual_click_matches", []))
@@ -345,6 +355,9 @@ def _capture_undo_snapshot(session: session_store.LoadedSession, action_label: s
         "removed_t2_ids": sorted(list(session.removed_t2_ids)),
         "ignored_t1_ids": sorted(list(session.ignored_t1_ids)),
         "ignored_t2_ids": sorted(list(session.ignored_t2_ids)),
+        "reviewed_unlinked_t1_ids": sorted(list(session.reviewed_unlinked_t1_ids)),
+        "reviewed_unlinked_t2_ids": sorted(list(session.reviewed_unlinked_t2_ids)),
+        "unlinked_spine_dispositions": dict(session.unlinked_spine_dispositions),
         "manual_t2_click_spines": copy.deepcopy(session.manual_t2_click_spines),
         "manual_t1_click_spines": copy.deepcopy(session.manual_t1_click_spines),
         "manual_click_matches": copy.deepcopy(session.manual_click_matches),
@@ -368,6 +381,9 @@ def _restore_undo_snapshot(session: session_store.LoadedSession, snap: dict) -> 
     session.removed_t2_ids = set(str(x) for x in snap.get("removed_t2_ids", []))
     session.ignored_t1_ids = set(str(x) for x in snap.get("ignored_t1_ids", []))
     session.ignored_t2_ids = set(str(x) for x in snap.get("ignored_t2_ids", []))
+    session.reviewed_unlinked_t1_ids = set(str(x) for x in snap.get("reviewed_unlinked_t1_ids", []))
+    session.reviewed_unlinked_t2_ids = set(str(x) for x in snap.get("reviewed_unlinked_t2_ids", []))
+    session.unlinked_spine_dispositions = dict(snap.get("unlinked_spine_dispositions", {}))
     session.manual_t2_click_spines = copy.deepcopy(snap.get("manual_t2_click_spines", []))
     session.manual_t1_click_spines = copy.deepcopy(snap.get("manual_t1_click_spines", []))
     session.manual_click_matches = copy.deepcopy(snap.get("manual_click_matches", []))
@@ -902,6 +918,291 @@ def _collect_not_in_t1_t2_ids(session: session_store.LoadedSession) -> set[str]:
     return out
 
 
+def _canonical_spine_id(value: object) -> str:
+    """Normalize spine IDs for set/lookup comparisons (avoid 100.0 float artifacts)."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, int):
+        return str(value)
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "none", "nat"}:
+        return ""
+    if re.fullmatch(r"\d+\.0+", s):
+        return str(int(float(s)))
+    return s
+
+
+def _resolve_spine_lookup(
+    session: session_store.LoadedSession, timepoint: str, spine_id: str
+) -> tuple[dict[str, object] | None, str]:
+    """Resolve a spine row from lookup, tolerating float/int ID formatting differences."""
+    lookup = session.t1_lookup if str(timepoint).lower() == "t1" else session.t2_lookup
+    sid = _canonical_spine_id(spine_id)
+    if not sid:
+        return None, str(spine_id)
+    if sid in lookup:
+        return lookup[sid], sid
+    target = _canonical_spine_id(spine_id)
+    for key, row in lookup.items():
+        if _canonical_spine_id(key) == target:
+            return row, str(key)
+    return None, sid
+
+
+def _unlinked_spine_key(timepoint: str, spine_id: str) -> str:
+    return f"{str(timepoint).lower()}:{_canonical_spine_id(spine_id)}"
+
+
+def _is_unlinked_spine(
+    session: session_store.LoadedSession,
+    timepoint: str,
+    spine_id: str,
+    *,
+    excluded_t1_nonmatch: set[str] | None = None,
+    excluded_t2_nonmatch: set[str] | None = None,
+) -> bool:
+    if excluded_t1_nonmatch is None or excluded_t2_nonmatch is None:
+        excluded_t1_nonmatch, excluded_t2_nonmatch, _rows = _collect_non_matched_dendrite_spines(session)
+    sid = _canonical_spine_id(spine_id)
+    if str(timepoint).lower() == "t1":
+        return sid in {_canonical_spine_id(x) for x in excluded_t1_nonmatch}
+    return sid in {_canonical_spine_id(x) for x in excluded_t2_nonmatch}
+
+
+def _unreviewed_unlinked_sets(
+    session: session_store.LoadedSession,
+    *,
+    excluded_t1_nonmatch: set[str],
+    excluded_t2_nonmatch: set[str],
+) -> tuple[set[str], set[str]]:
+    reviewed_t1 = {_canonical_spine_id(x) for x in session.reviewed_unlinked_t1_ids}
+    reviewed_t2 = {_canonical_spine_id(x) for x in session.reviewed_unlinked_t2_ids}
+    pending_t1 = {_canonical_spine_id(x) for x in excluded_t1_nonmatch} - reviewed_t1
+    pending_t2 = {_canonical_spine_id(x) for x in excluded_t2_nonmatch} - reviewed_t2
+    return pending_t1, pending_t2
+
+
+def _mark_unlinked_reviewed(session: session_store.LoadedSession, timepoint: str, spine_id: str) -> None:
+    sid = _canonical_spine_id(spine_id)
+    if not sid:
+        return
+    if str(timepoint).lower() == "t1":
+        session.reviewed_unlinked_t1_ids.add(sid)
+    else:
+        session.reviewed_unlinked_t2_ids.add(sid)
+
+
+def _set_unlinked_disposition(session: session_store.LoadedSession, timepoint: str, spine_id: str, disposition: str) -> None:
+    key = _unlinked_spine_key(timepoint, spine_id)
+    if disposition in {"artifact", "ignore"}:
+        session.unlinked_spine_dispositions[key] = disposition
+    else:
+        session.unlinked_spine_dispositions.pop(key, None)
+
+
+def _unlinked_disposition_exports(
+    session: session_store.LoadedSession,
+    *,
+    excluded_t1_nonmatch: set[str],
+    excluded_t2_nonmatch: set[str],
+) -> tuple[set[str], set[str], set[str], set[str]]:
+    """Explicit artifact/ignore choices on unlinked spines for export CSV routing."""
+    removed_t1: set[str] = set()
+    removed_t2: set[str] = set()
+    ignored_t1: set[str] = set()
+    ignored_t2: set[str] = set()
+    excl_t1 = {_canonical_spine_id(x) for x in excluded_t1_nonmatch}
+    excl_t2 = {_canonical_spine_id(x) for x in excluded_t2_nonmatch}
+    for key, disp in session.unlinked_spine_dispositions.items():
+        if ":" not in key:
+            continue
+        tp, sid = key.split(":", 1)
+        sid = _canonical_spine_id(sid)
+        if not sid:
+            continue
+        if tp == "t1" and sid not in excl_t1:
+            continue
+        if tp == "t2" and sid not in excl_t2:
+            continue
+        if disp == "artifact":
+            if tp == "t1":
+                removed_t1.add(sid)
+            else:
+                removed_t2.add(sid)
+        elif disp == "ignore":
+            if tp == "t1":
+                ignored_t1.add(sid)
+            else:
+                ignored_t2.add(sid)
+    return removed_t1, removed_t2, ignored_t1, ignored_t2
+
+
+def _strict_unclassified_snapshot(
+    session: session_store.LoadedSession,
+) -> tuple[set[str], set[str], set[str], set[str], set[str], set[str], set[str], set[str], set[str], set[str]]:
+    """
+    Single source of truth for export gate + Final Spine Step cleanup queue.
+    Returns matched_t1, matched_t2, new_t2, lost_t1, removed_t1, removed_t2,
+    ignored_t1, ignored_t2, unclassified_t1, unclassified_t2.
+    """
+    _rebuild_decision_state(session)
+    excluded_t1_nonmatch, excluded_t2_nonmatch, _rows = _collect_non_matched_dendrite_spines(session)
+    matched_t1, matched_t2, new_t2, lost_t1, removed_t1, removed_t2, ignored_t1, ignored_t2 = _current_classification_sets(
+        session,
+        excluded_t1_nonmatch=excluded_t1_nonmatch,
+        excluded_t2_nonmatch=excluded_t2_nonmatch,
+    )
+    unclassified_t1, unclassified_t2 = _strict_export_unclassified_counts(
+        session,
+        excluded_t1_nonmatch=excluded_t1_nonmatch,
+        excluded_t2_nonmatch=excluded_t2_nonmatch,
+        matched_t1=matched_t1,
+        matched_t2=matched_t2,
+        new_t2=new_t2,
+        lost_t1=lost_t1,
+        removed_t1=removed_t1,
+        removed_t2=removed_t2,
+        ignored_t1=ignored_t1,
+        ignored_t2=ignored_t2,
+    )
+    return (
+        matched_t1,
+        matched_t2,
+        new_t2,
+        lost_t1,
+        removed_t1,
+        removed_t2,
+        ignored_t1,
+        ignored_t2,
+        unclassified_t1,
+        unclassified_t2,
+    )
+
+
+def _export_visual_review_blockers(
+    session: session_store.LoadedSession,
+) -> tuple[int, int, int, set[str], set[str], set[str], set[str]]:
+    """
+    Returns total_blockers, unclassified_count, unreviewed_unlinked_count,
+    unclassified_t1, unclassified_t2, unreviewed_unlinked_t1, unreviewed_unlinked_t2.
+    """
+    (
+        _matched_t1,
+        _matched_t2,
+        _new_t2,
+        _lost_t1,
+        _removed_t1,
+        _removed_t2,
+        _ignored_t1,
+        _ignored_t2,
+        unclassified_t1,
+        unclassified_t2,
+    ) = _strict_unclassified_snapshot(session)
+    excluded_t1_nonmatch, excluded_t2_nonmatch, _rows = _collect_non_matched_dendrite_spines(session)
+    unreviewed_unlinked_t1, unreviewed_unlinked_t2 = _unreviewed_unlinked_sets(
+        session,
+        excluded_t1_nonmatch=excluded_t1_nonmatch,
+        excluded_t2_nonmatch=excluded_t2_nonmatch,
+    )
+    unclassified_count = int(len(unclassified_t1) + len(unclassified_t2))
+    unreviewed_unlinked_count = int(len(unreviewed_unlinked_t1) + len(unreviewed_unlinked_t2))
+    total = unclassified_count + unreviewed_unlinked_count
+    return (
+        total,
+        unclassified_count,
+        unreviewed_unlinked_count,
+        unclassified_t1,
+        unclassified_t2,
+        unreviewed_unlinked_t1,
+        unreviewed_unlinked_t2,
+    )
+
+
+def _build_final_review_queue_items(session: session_store.LoadedSession) -> tuple[list[models.CleanupQueueItem], list[str], int, int]:
+    """Linked unclassified spines + unreviewed unlinked dendrite spines."""
+    (
+        _matched_t1,
+        _matched_t2,
+        _new_t2,
+        _lost_t1,
+        _removed_t1,
+        _removed_t2,
+        _ignored_t1,
+        _ignored_t2,
+        unclassified_t1,
+        unclassified_t2,
+    ) = _strict_unclassified_snapshot(session)
+    excluded_t1_nonmatch, excluded_t2_nonmatch, _rows = _collect_non_matched_dendrite_spines(session)
+    unreviewed_unlinked_t1, unreviewed_unlinked_t2 = _unreviewed_unlinked_sets(
+        session,
+        excluded_t1_nonmatch=excluded_t1_nonmatch,
+        excluded_t2_nonmatch=excluded_t2_nonmatch,
+    )
+
+    def _nearest_other_id(tp: str, x: float, y: float, z: float) -> str | None:
+        if tp == "t1":
+            best: tuple[float, str] | None = None
+            for t2_id, t2 in session.t2_lookup.items():
+                d = float(np.hypot(float(x) - float(t2["x"]), float(y) - float(t2["y"])))
+                if best is None or d < best[0]:
+                    best = (d, str(t2_id))
+            return best[1] if best else None
+        best = None
+        for t1_id, t1 in session.t1_lookup.items():
+            d = float(np.hypot(float(x) - float(t1["x"]), float(y) - float(t1["y"])))
+            if best is None or d < best[0]:
+                best = (d, str(t1_id))
+        return best[1] if best else None
+
+    def _append_item(
+        items: list[models.CleanupQueueItem],
+        orphan_ids: list[str],
+        tp: str,
+        sid: str,
+        *,
+        is_unlinked: bool,
+    ) -> None:
+        row, resolved_id = _resolve_spine_lookup(session, tp, str(sid))
+        if not row:
+            orphan_ids.append(f"{tp}:{_canonical_spine_id(sid)}")
+            return
+        x, y, z = float(row["x"]), float(row["y"]), float(row["z"])
+        dendrite_id = None
+        if row.get("dendrite_id") is not None:
+            dendrite_id = str(row.get("dendrite_id"))
+        items.append(
+            models.CleanupQueueItem(
+                timepoint="t1" if tp == "t1" else "t2",
+                spine_id=str(resolved_id),
+                x=x,
+                y=y,
+                z=z,
+                nearest_other_timepoint_spine_id=_nearest_other_id(tp, x, y, z),
+                is_unlinked_dendrite=is_unlinked,
+                dendrite_id=dendrite_id,
+            )
+        )
+
+    items: list[models.CleanupQueueItem] = []
+    orphan_ids: list[str] = []
+    for sid in sorted(unclassified_t1, key=_canonical_spine_id):
+        _append_item(items, orphan_ids, "t1", str(sid), is_unlinked=False)
+    for sid in sorted(unclassified_t2, key=_canonical_spine_id):
+        _append_item(items, orphan_ids, "t2", str(sid), is_unlinked=False)
+    for sid in sorted(unreviewed_unlinked_t1, key=_canonical_spine_id):
+        _append_item(items, orphan_ids, "t1", str(sid), is_unlinked=True)
+    for sid in sorted(unreviewed_unlinked_t2, key=_canonical_spine_id):
+        _append_item(items, orphan_ids, "t2", str(sid), is_unlinked=True)
+
+    unclassified_count = int(len(unclassified_t1) + len(unclassified_t2))
+    unreviewed_unlinked_count = int(len(unreviewed_unlinked_t1) + len(unreviewed_unlinked_t2))
+    return items, orphan_ids, unclassified_count, unreviewed_unlinked_count
+
+
 def _strict_export_unclassified_counts(
     session: session_store.LoadedSession,
     *,
@@ -928,6 +1229,25 @@ def _strict_export_unclassified_counts(
     unclassified_t1 = eligible_t1 - classified_t1
     unclassified_t2 = eligible_t2 - classified_t2
     return unclassified_t1, unclassified_t2
+
+
+def _current_classification_sets(
+    session: session_store.LoadedSession, *, excluded_t1_nonmatch: set[str], excluded_t2_nonmatch: set[str]
+) -> tuple[set[str], set[str], set[str], set[str], set[str], set[str], set[str], set[str]]:
+    matched_t2 = set(str(k) for k in session.algo_matches.keys())
+    matched_t1 = set(str(v.get("t1_spine_id", "")) for v in session.algo_matches.values() if v.get("t1_spine_id"))
+    for row in session.review_decisions.values():
+        if str(row.get("action", "")) in {"match", "manual_match"} and row.get("t1_spine_id"):
+            matched_t2.add(str(row.get("t2_spine_id", "")))
+            matched_t1.add(str(row.get("t1_spine_id", "")))
+    not_in_t1_t2 = _collect_not_in_t1_t2_ids(session) - excluded_t2_nonmatch
+    removed_t1 = set(str(x) for x in session.removed_t1_ids) - excluded_t1_nonmatch
+    removed_t2 = (set(str(x) for x in session.removed_t2_ids) - excluded_t2_nonmatch) - not_in_t1_t2
+    ignored_t1 = set(str(x) for x in session.ignored_t1_ids) - excluded_t1_nonmatch
+    ignored_t2 = (set(str(x) for x in session.ignored_t2_ids) - excluded_t2_nonmatch).union(not_in_t1_t2)
+    new_t2 = set(str(x) for x in session.new_t2_ids) - excluded_t2_nonmatch
+    lost_t1 = set(str(x) for x in session.lost_t1_ids) - excluded_t1_nonmatch
+    return matched_t1, matched_t2, new_t2, lost_t1, removed_t1, removed_t2, ignored_t1, ignored_t2
 
 
 def _compute_inferred_new_t2_candidates(
@@ -1279,6 +1599,21 @@ def simple_home() -> str:
     let modalRaf = null;
     let detachedCompareWindow = null;
     let detachedCompareReady = false;
+    let finalSpineStepWindow = null;
+    let finalSpineStepReady = false;
+    let finalSpineStep = {
+      active: false,
+      queue: [],
+      idx: 0,
+      outputName: '',
+      inFlight: false,
+    };
+    let finalStepView = { t1: { scale: 6.0, tx: 0, ty: 0 }, t2: { scale: 6.0, tx: 0, ty: 0 } };
+    let finalStepCache = { key: '', p1: null, p2: null, item: null };
+    let finalStepDrag = { active: false, pane: null, startX: 0, startY: 0, startTx: 0, startTy: 0, pendingDx: 0, pendingDy: 0, moved: false };
+    let finalStepRaf = null;
+    let finalStepAlignZOnFetch = false;
+    let finalStepSuggest = { t1: null, t2: null };
     const syncModalMovement = false; // Ready for future sync mode.
     const FOCUS_ZOOM_SCALE = 6.0;
 
@@ -2020,24 +2355,1024 @@ def simple_home() -> str:
       });
     }
 
+    async function submitExport(outputName = '') {
+      return fetch('/results/export', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ use_dialog: true, output_name: outputName })
+      });
+    }
+
+    function parseBlockedUnclassifiedCount(msg) {
+      const mTotal = String(msg || '').match(/You have\\s+(\\d+)\\s+spines requiring final visual review/i);
+      if (mTotal) return Number(mTotal[1]);
+      const m = String(msg || '').match(/You have\\s+(\\d+)\\s+unclassified spines/i);
+      return m ? Number(m[1]) : 0;
+    }
+
+    function isFinalSpineStepOpen() {
+      return !!finalSpineStepWindow && !finalSpineStepWindow.closed && finalSpineStepReady;
+    }
+
+    function finalStepDocument() {
+      return isFinalSpineStepOpen() ? finalSpineStepWindow.document : null;
+    }
+
+    function finalStepEl(id) {
+      const doc = finalStepDocument();
+      return doc ? doc.getElementById(id) : null;
+    }
+
+    function finalSpineStepMarkup() {
+      return `
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Final Spine Step</title>
+  <style>
+    body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: #f7f9fc; color: #1a202c; }
+    .header { background: #fff; border-bottom: 2px solid #2b6cb0; padding: 14px 18px; }
+    .title { font-size: 18px; font-weight: 700; color: #1a365d; }
+    .source-banner {
+      margin-top: 8px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid #90cdf4;
+      background: #ebf8ff;
+      color: #1a365d;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .queue-meta { font-size: 12px; color: #4a5568; margin-top: 8px; }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 18px;
+      background: #edf2f7;
+      border-bottom: 1px solid #cbd5e0;
+    }
+    .actions button {
+      font-size: 13px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      border: 1px solid #cbd5e0;
+      background: #fff;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-new { border-color: #2b6cb0; color: #2b6cb0; }
+    .btn-lost { border-color: #c53030; color: #c53030; }
+    .btn-artifact { border-color: #975a16; color: #975a16; }
+    .btn-ignore { border-color: #718096; color: #4a5568; }
+    .controls { padding: 10px 18px; font-size: 13px; display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+    .viewer-row { display: flex; gap: 16px; padding: 16px 18px; justify-content: center; align-items: flex-start; }
+    .pane-label { font-size: 13px; font-weight: 700; margin-bottom: 6px; color: #2d3748; }
+    .modal-viewport {
+      width: 520px;
+      height: 520px;
+      border: 1px solid #cbd5e0;
+      overflow: hidden;
+      position: relative;
+      cursor: grab;
+      background: #111;
+      border-radius: 4px;
+    }
+    .modal-viewport.grabbing { cursor: grabbing; }
+    .slice-overlay {
+      position: absolute;
+      right: 8px;
+      top: 8px;
+      z-index: 5;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.55);
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 12px;
+      pointer-events: none;
+    }
+    .modal-canvas {
+      width: 520px;
+      height: 520px;
+      transform-origin: 0 0;
+      will-change: transform;
+      image-rendering: pixelated;
+      display: block;
+    }
+    .zoom-col {
+      min-width: 90px;
+      border: 1px solid #cbd5e0;
+      border-radius: 8px;
+      padding: 8px;
+      background: #fff;
+    }
+    .zoom-col button { width: 100%; margin: 2px 0; font-size: 12px; padding: 6px; }
+    .coords { font-size: 12px; color: #4a5568; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="title">Final Spine Step</div>
+    <div id="fssSourceBanner" class="source-banner">CURRENT SPINE SOURCE: —</div>
+    <div id="fssQueueMeta" class="queue-meta">Remaining: —</div>
+  </div>
+  <div class="actions">
+    <button id="fssBtnReviewed" class="btn-ignore">Mark Reviewed (R)</button>
+    <button id="fssBtnNewT2" class="btn-new" disabled>New Spine T2 (N)</button>
+    <button id="fssBtnLostT1" class="btn-lost" disabled>Lost T1 Spine (L)</button>
+    <button id="fssBtnIgnoreT1" class="btn-ignore" disabled>Ignore T1 — T2 not in focus (1)</button>
+    <button id="fssBtnIgnoreT2" class="btn-ignore" disabled>Ignore T2 — T1 not in focus (2)</button>
+    <button id="fssBtnArtifact" class="btn-artifact">Artifact (A)</button>
+  </div>
+  <div class="controls">
+    <label><input id="fssSuggestByClick" type="checkbox" /> Suggest by click</label>
+    <span id="fssSuggestHint" style="font-size:12px; color:#4a5568; display:none;">Click T1 or T2 to pick the nearest spine at that location.</span>
+    <label>T1 Z <span id="fssSliceT1Label">—</span></label>
+    <input id="fssSliceT1" type="range" min="0" max="20" value="10" />
+    <label>T2 Z <span id="fssSliceT2Label">—</span></label>
+    <input id="fssSliceT2" type="range" min="0" max="20" value="10" />
+    <label>Brightness</label>
+    <input id="fssBrightness" type="range" min="-50" max="50" value="0" />
+    <label>Contrast</label>
+    <input id="fssContrast" type="range" min="50" max="200" value="100" />
+  </div>
+  <div class="viewer-row">
+    <div style="min-width:90px;" class="zoom-col">
+      <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Zoom</div>
+      <button id="fssZoom25">25%</button>
+      <button id="fssZoom50">50%</button>
+      <button id="fssZoom75">75%</button>
+      <button id="fssZoom100">100%</button>
+      <button id="fssZoom200">200%</button>
+      <button id="fssZoomFocus">Focus spine</button>
+    </div>
+    <div>
+      <div class="pane-label">Timepoint 1 (T1)</div>
+      <div id="fssViewportT1" class="modal-viewport">
+        <canvas id="fssCanvasT1" class="modal-canvas" width="520" height="520"></canvas>
+        <div id="fssSliceOverlayT1" class="slice-overlay">Z —</div>
+      </div>
+      <div id="fssCoordsT1" class="coords"></div>
+    </div>
+    <div>
+      <div class="pane-label">Timepoint 2 (T2)</div>
+      <div id="fssViewportT2" class="modal-viewport">
+        <canvas id="fssCanvasT2" class="modal-canvas" width="520" height="520"></canvas>
+        <div id="fssSliceOverlayT2" class="slice-overlay">Z —</div>
+      </div>
+      <div id="fssCoordsT2" class="coords"></div>
+    </div>
+  </div>
+</body>
+</html>`;
+    }
+
+    function ensureFinalSpineStepWindow() {
+      if (isFinalSpineStepOpen()) {
+        finalSpineStepWindow.focus();
+        return finalSpineStepWindow;
+      }
+      const w = window.open('', 'finalSpineStep', 'width=1320,height=820,resizable=yes,scrollbars=no');
+      if (!w) {
+        alert('Popup was blocked. Allow popups for this annotator page, then retry Export.');
+        return null;
+      }
+      finalSpineStepWindow = w;
+      finalSpineStepReady = false;
+      w.document.open();
+      w.document.write(finalSpineStepMarkup());
+      w.document.close();
+      finalSpineStepReady = true;
+      wireFinalSpineStepControls(w.document);
+      syncFinalStepSliceSliderMax();
+      updateFinalStepSuggestHint();
+      w.addEventListener('beforeunload', (ev) => {
+        if (finalSpineStep.active && finalSpineStep.queue.length > finalSpineStep.idx) {
+          ev.preventDefault();
+          ev.returnValue = 'Unclassified spines remain. Complete Final Spine Step before closing.';
+        }
+      });
+      w.addEventListener('unload', () => {
+        if (finalSpineStepWindow === w) {
+          finalSpineStepReady = false;
+          finalSpineStepWindow = null;
+        }
+      });
+      w.focus();
+      return w;
+    }
+
+    function closeFinalSpineStepWindow() {
+      if (isFinalSpineStepOpen()) {
+        finalSpineStepReady = false;
+        finalSpineStepWindow.close();
+        finalSpineStepWindow = null;
+      }
+    }
+
+    function syncFinalStepSliceSliderMax() {
+      const m1 = Math.max(0, Math.floor(Number(sessionStackZ.t1)));
+      const m2 = Math.max(0, Math.floor(Number(sessionStackZ.t2)));
+      ['fssSliceT1', 'fssSliceT2'].forEach((id) => {
+        const el = finalStepEl(id);
+        if (!el) return;
+        const m = id === 'fssSliceT1' ? m1 : m2;
+        el.min = '0';
+        el.max = String(m);
+        el.step = '1';
+        let c = Number(el.value || 0);
+        if (c > m) el.value = String(m);
+        if (c < 0) el.value = '0';
+      });
+    }
+
+    function finalSpineStepSourceLabel(item) {
+      if (!item) return 'CURRENT SPINE SOURCE: —';
+      const tp = String(item.timepoint || '').toLowerCase();
+      const unlinked = !!item.is_unlinked_dendrite;
+      const dend = item.dendrite_id ? ` | dendrite ${item.dendrite_id}` : '';
+      if (unlinked) {
+        if (tp === 't1') return `UNLINKED DENDRITE — TIMEPOINT 1 (T1) — spine ${item.spine_id}${dend}`;
+        if (tp === 't2') return `UNLINKED DENDRITE — TIMEPOINT 2 (T2) — spine ${item.spine_id}${dend}`;
+        return `UNLINKED DENDRITE — spine ${item.spine_id}${dend}`;
+      }
+      if (tp === 't1') return `CURRENT SPINE SOURCE: TIMEPOINT 1 (T1) — spine ${item.spine_id}`;
+      if (tp === 't2') return `CURRENT SPINE SOURCE: TIMEPOINT 2 (T2) — spine ${item.spine_id}`;
+      return `CURRENT SPINE SOURCE: ${String(item.timepoint || '').toUpperCase()} — spine ${item.spine_id}`;
+    }
+
+    function updateFinalSpineStepChrome(item) {
+      const banner = finalStepEl('fssSourceBanner');
+      const meta = finalStepEl('fssQueueMeta');
+      const unlinked = !!(item && item.is_unlinked_dendrite);
+      if (banner) {
+        banner.textContent = finalSpineStepSourceLabel(item);
+        banner.style.background = unlinked ? '#fff5eb' : '#ebf8ff';
+        banner.style.borderColor = unlinked ? '#ed8936' : '#90cdf4';
+        banner.style.color = unlinked ? '#7b341e' : '#1a365d';
+      }
+      const remaining = Math.max(0, finalSpineStep.queue.length - finalSpineStep.idx);
+      if (meta) {
+        if (!item) {
+          meta.textContent = 'Queue complete';
+        } else if (unlinked) {
+          meta.textContent = `${remaining} remaining | unlinked dendrite visual review | x=${Number(item.x).toFixed(1)} y=${Number(item.y).toFixed(1)} z=${Number(item.z).toFixed(1)}`;
+        } else {
+          meta.textContent = `${remaining} spine${remaining === 1 ? '' : 's'} remaining in cleanup queue | x=${Number(item.x).toFixed(1)} y=${Number(item.y).toFixed(1)} z=${Number(item.z).toFixed(1)}`;
+        }
+      }
+      const isT1 = item && String(item.timepoint).toLowerCase() === 't1';
+      const isT2 = item && String(item.timepoint).toLowerCase() === 't2';
+      const btnReviewed = finalStepEl('fssBtnReviewed');
+      const btnNew = finalStepEl('fssBtnNewT2');
+      const btnLost = finalStepEl('fssBtnLostT1');
+      const btnIgnT1 = finalStepEl('fssBtnIgnoreT1');
+      const btnIgnT2 = finalStepEl('fssBtnIgnoreT2');
+      const btnArt = finalStepEl('fssBtnArtifact');
+      if (btnReviewed) btnReviewed.disabled = !item || finalSpineStep.inFlight || !unlinked;
+      if (unlinked) {
+        if (btnNew) btnNew.disabled = true;
+        if (btnLost) btnLost.disabled = true;
+        if (btnIgnT1) btnIgnT1.disabled = !isT1 || finalSpineStep.inFlight;
+        if (btnIgnT2) btnIgnT2.disabled = !isT2 || finalSpineStep.inFlight;
+        if (btnArt) btnArt.disabled = !item || finalSpineStep.inFlight;
+      } else {
+        if (btnNew) btnNew.disabled = !isT2 || finalSpineStep.inFlight;
+        if (btnLost) btnLost.disabled = !isT1 || finalSpineStep.inFlight;
+        if (btnIgnT1) btnIgnT1.disabled = !isT1 || finalSpineStep.inFlight;
+        if (btnIgnT2) btnIgnT2.disabled = !isT2 || finalSpineStep.inFlight;
+        if (btnArt) btnArt.disabled = !item || finalSpineStep.inFlight;
+      }
+    }
+
+    function clampFinalStepPan(pane) {
+      const v = finalStepView[pane];
+      const viewport = finalStepEl(pane === 't1' ? 'fssViewportT1' : 'fssViewportT2');
+      const canvas = finalStepEl(pane === 't1' ? 'fssCanvasT1' : 'fssCanvasT2');
+      if (!viewport || !canvas) return;
+      const vw = viewport.clientWidth;
+      const vh = viewport.clientHeight;
+      const cw = canvas.clientWidth * v.scale;
+      const ch = canvas.clientHeight * v.scale;
+      const marginX = vw * 0.8;
+      const marginY = vh * 0.8;
+      v.tx = Math.max(vw - cw - marginX, Math.min(marginX, v.tx));
+      v.ty = Math.max(vh - ch - marginY, Math.min(marginY, v.ty));
+    }
+
+    function syncFinalStepPaneTransform(sourcePane) {
+      const target = sourcePane === 't1' ? 't2' : 't1';
+      finalStepView[target] = { ...finalStepView[sourcePane] };
+    }
+
+    function applyFinalStepTransforms() {
+      if (finalStepDrag.active && finalStepDrag.pane) {
+        const pane = finalStepDrag.pane;
+        finalStepView[pane].tx = finalStepDrag.startTx + finalStepDrag.pendingDx;
+        finalStepView[pane].ty = finalStepDrag.startTy + finalStepDrag.pendingDy;
+        syncFinalStepPaneTransform(pane);
+      }
+      ['t1', 't2'].forEach((pane) => {
+        clampFinalStepPan(pane);
+        const v = finalStepView[pane];
+        const canvas = finalStepEl(pane === 't1' ? 'fssCanvasT1' : 'fssCanvasT2');
+        if (!canvas) return;
+        canvas.style.transform = `translate3d(${v.tx}px, ${v.ty}px, 0) scale(${v.scale})`;
+      });
+    }
+
+    function scheduleFinalStepTransformApply() {
+      if (finalStepRaf) cancelAnimationFrame(finalStepRaf);
+      finalStepRaf = requestAnimationFrame(() => {
+        finalStepRaf = null;
+        applyFinalStepTransforms();
+      });
+    }
+
+    function finalStepCropOk(p) {
+      return !!(p && Array.isArray(p.image_2d) && p.image_2d.length > 0 && Array.isArray(p.image_2d[0]) && p.image_2d[0].length > 0);
+    }
+
+    function resetFinalStepView() {
+      finalStepView = {
+        t1: { scale: 1.0, tx: 0, ty: 0 },
+        t2: { scale: 1.0, tx: 0, ty: 0 },
+      };
+      scheduleFinalStepTransformApply();
+    }
+
+    function focusFinalStepPaneAtCanvasXY(pane, clickX, clickY, scale = FOCUS_ZOOM_SCALE) {
+      const viewport = finalStepEl(pane === 't1' ? 'fssViewportT1' : 'fssViewportT2');
+      if (!viewport) return;
+      const rect = viewport.getBoundingClientRect();
+      const vw = rect.width || viewport.clientWidth || 520;
+      const vh = rect.height || viewport.clientHeight || 520;
+      finalStepView[pane].scale = scale;
+      finalStepView[pane].tx = (vw / 2) - (clickX * scale);
+      finalStepView[pane].ty = (vh / 2) - (clickY * scale);
+      syncFinalStepPaneTransform(pane);
+      scheduleFinalStepTransformApply();
+    }
+
+    function focusFinalStepOnLoadedCrops(item, p1, p2) {
+      if (!item || !finalStepCropOk(p1) || !finalStepCropOk(p2)) return;
+      const isT1 = String(item.timepoint).toLowerCase() === 't1';
+      const preview = isT1 ? p1 : p2;
+      const canvas = finalStepEl(isT1 ? 'fssCanvasT1' : 'fssCanvasT2');
+      if (!canvas) return;
+      const ih = preview.image_2d.length;
+      const iw = preview.image_2d[0].length;
+      const lx = Number(preview.meta?.center_index_local?.x);
+      const ly = Number(preview.meta?.center_index_local?.y);
+      const clickX = ((Number.isFinite(lx) ? lx : iw / 2) / Math.max(iw, 1)) * canvas.width;
+      const clickY = ((Number.isFinite(ly) ? ly : ih / 2) / Math.max(ih, 1)) * canvas.height;
+      focusFinalStepPaneAtCanvasXY(isT1 ? 't1' : 't2', clickX, clickY, FOCUS_ZOOM_SCALE);
+    }
+
+    function centerFinalStepOnSpine(item) {
+      resetFinalStepView();
+      const z = Math.round(Number(item?.z || 0));
+      const s1 = finalStepEl('fssSliceT1');
+      const s2 = finalStepEl('fssSliceT2');
+      const m1 = Math.max(0, Math.floor(Number(sessionStackZ.t1)));
+      const m2 = Math.max(0, Math.floor(Number(sessionStackZ.t2)));
+      if (s1) s1.value = String(Math.max(0, Math.min(m1, z)));
+      if (s2) s2.value = String(Math.max(0, Math.min(m2, z)));
+    }
+
+    function finalStepEventToCanvasImageXY(pane, ev) {
+      const viewport = finalStepEl(pane === 't1' ? 'fssViewportT1' : 'fssViewportT2');
+      const canvas = finalStepEl(pane === 't1' ? 'fssCanvasT1' : 'fssCanvasT2');
+      const p = pane === 't1' ? finalStepCache.p1 : finalStepCache.p2;
+      if (!viewport || !canvas || !finalStepCropOk(p)) return null;
+      const rect = viewport.getBoundingClientRect();
+      const px = ev.clientX - rect.left;
+      const py = ev.clientY - rect.top;
+      const v = finalStepView[pane];
+      const xCanvas = (px - v.tx) / Math.max(v.scale, 1e-6);
+      const yCanvas = (py - v.ty) / Math.max(v.scale, 1e-6);
+      const h = p.image_2d.length;
+      const w = p.image_2d[0].length;
+      return {
+        xImg: xCanvas * (w / canvas.width),
+        yImg: yCanvas * (h / canvas.height),
+      };
+    }
+
+    function finalStepClickEventToSourceXYZ(pane, ev) {
+      const p = pane === 't1' ? finalStepCache.p1 : finalStepCache.p2;
+      if (!finalStepCropOk(p)) return null;
+      const pos = finalStepEventToCanvasImageXY(pane, ev);
+      if (!pos) return null;
+      const sliceEl = finalStepEl(pane === 't1' ? 'fssSliceT1' : 'fssSliceT2');
+      const z = Number(sliceEl?.value ?? p.meta?.center_index_source?.z ?? 0);
+      return {
+        x: Number(p.meta.source_bounds.x0 || 0) + Number(pos.xImg || 0),
+        y: Number(p.meta.source_bounds.y0 || 0) + Number(pos.yImg || 0),
+        z,
+      };
+    }
+
+    async function finalStepNearestByClick(pane, ev) {
+      const xyz = finalStepClickEventToSourceXYZ(pane, ev);
+      if (!xyz) return null;
+      const resp = await fetch('/spines/nearest', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ timepoint: pane, x: xyz.x, y: xyz.y, z: xyz.z, limit: 5 }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.items?.length) return null;
+      return { spine_id: String(data.items[0].spine_id), distance_xy: data.items[0].distance_xy, distance_z: data.items[0].distance_z };
+    }
+
+    async function suggestFinalStepByClick(pane, ev) {
+      if (!finalSpineStep.active) return;
+      const hit = await finalStepNearestByClick(pane, ev);
+      if (!hit?.spine_id) {
+        setOut('No spine found near click.');
+        return;
+      }
+      const previewPane = pane === 't1' ? finalStepCache.p1 : finalStepCache.p2;
+      const sliceEl = finalStepEl(pane === 't1' ? 'fssSliceT1' : 'fssSliceT2');
+      const sliceIdx = Math.max(0, Math.round(Number(sliceEl?.value || 0)));
+      const spinePrev = await fetch('/crops/preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          timepoint: pane,
+          spine_id: hit.spine_id,
+          width: 1024,
+          height: 1024,
+          depth: 21,
+          projection: 'slice',
+          slice_z_mode: 'stack_global',
+          slice_index: sliceIdx,
+        }),
+      }).then((r) => r.json());
+      if (!finalStepCropOk(spinePrev) || !finalStepCropOk(previewPane)) {
+        finalStepSuggest[pane] = { spine_id: hit.spine_id, local_x: null, local_y: null, distance_xy: hit.distance_xy, distance_z: hit.distance_z };
+      } else {
+        const gx = Number(spinePrev.meta?.center_index_source?.x);
+        const gy = Number(spinePrev.meta?.center_index_source?.y);
+        const gz = Number(spinePrev.meta?.center_index_source?.z);
+        const lx = gx - Number(previewPane.meta?.source_bounds?.x0 || 0);
+        const ly = gy - Number(previewPane.meta?.source_bounds?.y0 || 0);
+        finalStepSuggest[pane] = {
+          spine_id: hit.spine_id,
+          local_x: lx,
+          local_y: ly,
+          spine_z: gz,
+          distance_xy: hit.distance_xy,
+          distance_z: hit.distance_z,
+        };
+        if (sliceEl && Number.isFinite(gz)) {
+          const zmax = pane === 't1' ? sessionStackZ.t1 : sessionStackZ.t2;
+          sliceEl.value = String(Math.max(0, Math.min(Math.floor(Number(zmax)), Math.round(gz))));
+          await renderFinalSpineStep(true);
+          return;
+        }
+      }
+      scheduleFinalSpineStepRender();
+      setOut({ message: `Suggested ${pane.toUpperCase()} spine ${hit.spine_id}`, suggest: finalStepSuggest[pane] });
+    }
+
+    function focusFinalStepPaneAtEvent(pane, ev) {
+      const viewport = finalStepEl(pane === 't1' ? 'fssViewportT1' : 'fssViewportT2');
+      if (!viewport) return;
+      const rect = viewport.getBoundingClientRect();
+      const clickX = ev.clientX - rect.left;
+      const clickY = ev.clientY - rect.top;
+      focusFinalStepPaneAtCanvasXY(pane, clickX, clickY, FOCUS_ZOOM_SCALE);
+    }
+
+    function updateFinalStepSuggestHint() {
+      const on = !!finalStepEl('fssSuggestByClick')?.checked;
+      const hint = finalStepEl('fssSuggestHint');
+      if (hint) hint.style.display = on ? 'inline' : 'none';
+    }
+
+    function drawFinalStepCanvas(canvasId, image2d, minV, maxV, zoom, brightness, contrast, label, marker, suggestMarker) {
+      const canvas = finalStepEl(canvasId);
+      if (!canvas || !Array.isArray(image2d) || !image2d.length || !Array.isArray(image2d[0])) return;
+      const h = image2d.length;
+      const w = image2d[0].length;
+      if (!h || !w) return;
+      const tmp = canvas.ownerDocument.createElement('canvas');
+      tmp.width = w; tmp.height = h;
+      const ctx = tmp.getContext('2d');
+      const img = ctx.createImageData(w, h);
+      const den = (maxV - minV) > 1e-9 ? (maxV - minV) : 1.0;
+      let k = 0;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          let n = (image2d[y][x] - minV) / den;
+          n = ((n - 0.5) * contrast + 0.5) + brightness;
+          const v = Math.max(0, Math.min(255, Math.round(n * 255)));
+          img.data[k++] = v; img.data[k++] = v; img.data[k++] = v; img.data[k++] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      const out = canvas.getContext('2d');
+      out.clearRect(0, 0, canvas.width, canvas.height);
+      out.drawImage(tmp, 0, 0, canvas.width, canvas.height);
+      if (marker && Number.isFinite(Number(marker.x)) && Number.isFinite(Number(marker.y))) {
+        const sx = canvas.width / w;
+        const sy = canvas.height / h;
+        const mx = Number(marker.x) * sx;
+        const my = Number(marker.y) * sy;
+        out.strokeStyle = '#e53e3e';
+        out.lineWidth = Math.max(0.6, 1.4 / Math.max(zoom || 1.0, 1e-6));
+        out.beginPath();
+        out.arc(mx, my, Math.max(2.0, 5.0 / Math.max(zoom || 1.0, 1e-6)), 0, Math.PI * 2);
+        out.stroke();
+        out.fillStyle = '#e53e3e';
+        out.font = '13px Arial';
+        out.fillText(marker.text || '', mx + 9, my - 8);
+      }
+      if (suggestMarker && Number.isFinite(Number(suggestMarker.x)) && Number.isFinite(Number(suggestMarker.y))) {
+        const sx = canvas.width / w;
+        const sy = canvas.height / h;
+        const mx = Number(suggestMarker.x) * sx;
+        const my = Number(suggestMarker.y) * sy;
+        if (mx >= 0 && my >= 0 && mx <= canvas.width && my <= canvas.height) {
+          out.strokeStyle = '#ffd54f';
+          out.lineWidth = Math.max(0.8, 1.8 / Math.max(zoom || 1.0, 1e-6));
+          out.beginPath();
+          out.arc(mx, my, Math.max(2.5, 6.0 / Math.max(zoom || 1.0, 1e-6)), 0, Math.PI * 2);
+          out.stroke();
+          out.fillStyle = '#ffd54f';
+          out.font = '12px Arial';
+          out.fillText(suggestMarker.text || 'suggested', mx + 9, my + 14);
+        }
+      }
+      out.fillStyle = '#3182ce'; out.font = '13px Arial'; out.fillText(label, 10, 20);
+    }
+
+    function renderFinalSpineStepVisual() {
+      const item = finalStepCache.item;
+      const p1 = finalStepCache.p1;
+      const p2 = finalStepCache.p2;
+      if (!item || !finalStepCropOk(p1) || !finalStepCropOk(p2)) return;
+      const brightness = Number(finalStepEl('fssBrightness')?.value || 0) / 100.0;
+      const contrast = Number(finalStepEl('fssContrast')?.value || 100) / 100.0;
+      const isT1 = String(item.timepoint).toLowerCase() === 't1';
+      const spineId = String(item.spine_id);
+      const t1Suggest = finalStepSuggest.t1;
+      const t2Suggest = finalStepSuggest.t2;
+      drawFinalStepCanvas(
+        'fssCanvasT1',
+        p1.image_2d,
+        p1.intensity_min,
+        p1.intensity_max,
+        finalStepView.t1.scale,
+        brightness,
+        contrast,
+        'T1',
+        isT1 ? { x: p1.meta?.center_index_local?.x, y: p1.meta?.center_index_local?.y, text: `id ${spineId}` } : null,
+        (t1Suggest && Number.isFinite(Number(t1Suggest.local_x)))
+          ? { x: t1Suggest.local_x, y: t1Suggest.local_y, text: `suggest ${t1Suggest.spine_id}` }
+          : null,
+      );
+      drawFinalStepCanvas(
+        'fssCanvasT2',
+        p2.image_2d,
+        p2.intensity_min,
+        p2.intensity_max,
+        finalStepView.t2.scale,
+        brightness,
+        contrast,
+        'T2',
+        !isT1 ? { x: p2.meta?.center_index_local?.x, y: p2.meta?.center_index_local?.y, text: `id ${spineId}` } : null,
+        (t2Suggest && Number.isFinite(Number(t2Suggest.local_x)))
+          ? { x: t2Suggest.local_x, y: t2Suggest.local_y, text: `suggest ${t2Suggest.spine_id}` }
+          : null,
+      );
+      const maxT1 = Math.max(0, Math.floor(Number(sessionStackZ.t1)));
+      const maxT2 = Math.max(0, Math.floor(Number(sessionStackZ.t2)));
+      const s1 = finalStepEl('fssSliceT1');
+      const s2 = finalStepEl('fssSliceT2');
+      if (s1) {
+        const v = Number(s1.value || 0);
+        const txt = `Z ${v + 1}/${maxT1 + 1}`;
+        const lbl = finalStepEl('fssSliceT1Label');
+        const ov = finalStepEl('fssSliceOverlayT1');
+        if (lbl) lbl.textContent = txt;
+        if (ov) ov.textContent = txt;
+      }
+      if (s2) {
+        const v = Number(s2.value || 0);
+        const txt = `Z ${v + 1}/${maxT2 + 1}`;
+        const lbl = finalStepEl('fssSliceT2Label');
+        const ov = finalStepEl('fssSliceOverlayT2');
+        if (lbl) lbl.textContent = txt;
+        if (ov) ov.textContent = txt;
+      }
+      const c1 = finalStepEl('fssCoordsT1');
+      const c2 = finalStepEl('fssCoordsT2');
+      let t1Line = `center x=${Number(p1.meta?.center_index_source?.x ?? item.x).toFixed(1)} y=${Number(p1.meta?.center_index_source?.y ?? item.y).toFixed(1)} z=${Number(p1.meta?.center_index_source?.z ?? item.z).toFixed(1)}`;
+      let t2Line = `center x=${Number(p2.meta?.center_index_source?.x ?? item.x).toFixed(1)} y=${Number(p2.meta?.center_index_source?.y ?? item.y).toFixed(1)} z=${Number(p2.meta?.center_index_source?.z ?? item.z).toFixed(1)}`;
+      if (t1Suggest?.spine_id) {
+        t1Line += ` | suggested: ${t1Suggest.spine_id} (dxy ${Number(t1Suggest.distance_xy ?? 0).toFixed(1)}, dz ${Number(t1Suggest.distance_z ?? 0).toFixed(1)})`;
+      }
+      if (t2Suggest?.spine_id) {
+        t2Line += ` | suggested: ${t2Suggest.spine_id} (dxy ${Number(t2Suggest.distance_xy ?? 0).toFixed(1)}, dz ${Number(t2Suggest.distance_z ?? 0).toFixed(1)})`;
+      }
+      if (c1) c1.textContent = t1Line;
+      if (c2) c2.textContent = t2Line;
+      applyFinalStepTransforms();
+    }
+
+    function scheduleFinalSpineStepRender() {
+      requestAnimationFrame(() => { renderFinalSpineStepVisual(); });
+    }
+
+    async function renderFinalSpineStep(forceFetch = false) {
+      if (!finalSpineStep.active || !isFinalSpineStepOpen()) return;
+      const item = finalSpineStep.queue[finalSpineStep.idx];
+      if (!item) return;
+      syncFinalStepSliceSliderMax();
+      const sliceT1 = Math.max(0, Math.min(Math.floor(Number(sessionStackZ.t1)), Math.round(Number(finalStepEl('fssSliceT1')?.value || item.z))));
+      const sliceT2 = Math.max(0, Math.min(Math.floor(Number(sessionStackZ.t2)), Math.round(Number(finalStepEl('fssSliceT2')?.value || item.z))));
+      const key = `${item.timepoint}|${item.spine_id}|${sliceT1}|${sliceT2}`;
+      if (!forceFetch && finalStepCache.key === key && finalStepCache.p1 && finalStepCache.p2) {
+        scheduleFinalSpineStepRender();
+        return;
+      }
+      const xyz = { x: Number(item.x), y: Number(item.y), z: Number(item.z) };
+      const bodyBase = {
+        width: 1024,
+        height: 1024,
+        depth: 21,
+        projection: 'slice',
+        slice_z_mode: 'stack_global',
+      };
+      const isT1Source = String(item.timepoint).toLowerCase() === 't1';
+      const t1Body = isT1Source
+        ? { ...bodyBase, timepoint: 't1', spine_id: String(item.spine_id), slice_index: sliceT1 }
+        : { ...bodyBase, timepoint: 't1', x: xyz.x, y: xyz.y, z: xyz.z, slice_index: sliceT1 };
+      const t2Body = !isT1Source
+        ? { ...bodyBase, timepoint: 't2', spine_id: String(item.spine_id), slice_index: sliceT2 }
+        : { ...bodyBase, timepoint: 't2', x: xyz.x, y: xyz.y, z: xyz.z, slice_index: sliceT2 };
+      async function fetchFinalStepCrop(body) {
+        const resp = await fetch('/crops/preview', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          const msg = (typeof data?.detail === 'string' && data.detail) ? data.detail : JSON.stringify(data);
+          throw new Error(msg || `Crop preview failed (${resp.status})`);
+        }
+        if (!finalStepCropOk(data)) {
+          throw new Error('Crop preview returned no image data.');
+        }
+        return data;
+      }
+      let p1;
+      let p2;
+      try {
+        [p1, p2] = await Promise.all([fetchFinalStepCrop(t1Body), fetchFinalStepCrop(t2Body)]);
+      } catch (err) {
+        const errMsg = String(err?.message || err);
+        const c1 = finalStepEl('fssCoordsT1');
+        const c2 = finalStepEl('fssCoordsT2');
+        if (c1) c1.textContent = `Preview error: ${errMsg}`;
+        if (c2) c2.textContent = 'Retry Z navigation or report if this persists.';
+        setOut({ final_spine_step_preview_error: errMsg, t1Body, t2Body });
+        return;
+      }
+      finalStepCache = { key, p1, p2, item };
+      if (finalStepAlignZOnFetch) {
+        const s1 = finalStepEl('fssSliceT1');
+        const s2 = finalStepEl('fssSliceT2');
+        let realign = false;
+        if (s1 && Number.isFinite(Number(p1?.meta?.center_index_source?.z))) {
+          const z1 = Math.max(Number(s1.min), Math.min(Number(s1.max), Number(p1.meta.center_index_source.z)));
+          if (Number(s1.value) !== z1) { s1.value = String(z1); realign = true; }
+        }
+        if (s2 && Number.isFinite(Number(p2?.meta?.center_index_source?.z))) {
+          const z2 = Math.max(Number(s2.min), Math.min(Number(s2.max), Number(p2.meta.center_index_source.z)));
+          if (Number(s2.value) !== z2) { s2.value = String(z2); realign = true; }
+        }
+        finalStepAlignZOnFetch = false;
+        if (realign) {
+          await renderFinalSpineStep(true);
+          return;
+        }
+      }
+      scheduleFinalSpineStepRender();
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          focusFinalStepOnLoadedCrops(item, p1, p2);
+          scheduleFinalSpineStepRender();
+        });
+      });
+    }
+
+    async function showFinalSpineStepCurrentItem() {
+      if (!finalSpineStep.active) return;
+      if (!ensureFinalSpineStepWindow()) return;
+      await refreshStackSliceBounds();
+      const cur = finalSpineStep.queue[finalSpineStep.idx];
+      if (!cur) {
+        finalSpineStep.active = false;
+        closeFinalSpineStepWindow();
+        alert('All spines successfully classified!');
+        const resp = await submitExport(finalSpineStep.outputName || '');
+        const data = await resp.json();
+        if (!resp.ok) {
+          const msg = (typeof data?.detail === 'string' && data.detail) ? data.detail : `Export failed: ${JSON.stringify(data)}`;
+          alert(msg);
+        }
+        setOut(data);
+        return;
+      }
+      updateFinalSpineStepChrome(cur);
+      finalStepCache = { key: '', p1: null, p2: null, item: null };
+      finalStepSuggest = { t1: null, t2: null };
+      finalStepAlignZOnFetch = true;
+      centerFinalStepOnSpine(cur);
+      updateFinalStepSuggestHint();
+      await renderFinalSpineStep(true);
+    }
+
+    async function refreshFinalSpineStepQueueAndContinue() {
+      const qResp = await fetch('/review/unclassified-cleanup-queue');
+      const qData = await qResp.json();
+      if (!qResp.ok) {
+        alert('Final Spine Step queue refresh failed: ' + (qData?.detail || JSON.stringify(qData)));
+        setOut(qData);
+        return;
+      }
+      finalSpineStep.queue = Array.isArray(qData.items) ? qData.items : [];
+      finalSpineStep.idx = 0;
+      await showFinalSpineStepCurrentItem();
+    }
+
+    async function classifyFinalSpineStep(classification) {
+      if (!finalSpineStep.active || finalSpineStep.inFlight) return;
+      const cur = finalSpineStep.queue[finalSpineStep.idx];
+      if (!cur) return;
+      finalSpineStep.inFlight = true;
+      updateFinalSpineStepChrome(cur);
+      try {
+        const resp = await fetch('/review/unclassified-cleanup/classify', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            timepoint: String(cur.timepoint),
+            spine_id: String(cur.spine_id),
+            classification: String(classification),
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          const msg = (typeof data?.detail === 'string' && data.detail) ? data.detail : `Classification failed: ${JSON.stringify(data)}`;
+          alert(msg);
+          setOut(data);
+          return;
+        }
+        setOut(data);
+        await refreshCounters();
+        await refreshFinalSpineStepQueueAndContinue();
+      } finally {
+        finalSpineStep.inFlight = false;
+        const next = finalSpineStep.queue[finalSpineStep.idx];
+        if (next) updateFinalSpineStepChrome(next);
+      }
+    }
+
+    async function startFinalSpineStepAfterBlockedExport(outputName) {
+      const qResp = await fetch('/review/unclassified-cleanup-queue');
+      const qData = await qResp.json();
+      if (!qResp.ok) {
+        alert('Could not start Final Spine Step: ' + (qData?.detail || JSON.stringify(qData)));
+        setOut(qData);
+        return;
+      }
+      const items = Array.isArray(qData.items) ? qData.items : [];
+      const total = Number(qData.total_unclassified ?? items.length);
+      const orphans = Array.isArray(qData.orphan_ids) ? qData.orphan_ids : [];
+      if (!items.length) {
+        if (total <= 0) {
+          const resp = await submitExport(outputName || '');
+          const data = await resp.json();
+          if (!resp.ok) {
+            const msg = (typeof data?.detail === 'string' && data.detail) ? data.detail : `Export failed: ${JSON.stringify(data)}`;
+            alert(msg);
+          } else {
+            alert('Export completed successfully.');
+          }
+          setOut(data);
+          return;
+        }
+        const orphanTxt = orphans.length ? `\n\nOrphan IDs (not in spine tables): ${orphans.join(', ')}` : '';
+        alert(
+          `Export reported ${total} unclassified spine(s), but none could be loaded into Final Spine Step.${orphanTxt}\n\nTry Save Now, reload the session, or contact support with this message.`
+        );
+        setOut(qData);
+        return;
+      }
+      finalSpineStep = {
+        active: true,
+        queue: items,
+        idx: 0,
+        outputName: outputName || '',
+        inFlight: false,
+      };
+      await showFinalSpineStepCurrentItem();
+    }
+
+    function setFinalStepZoomBoth(scale) {
+      finalStepView.t1.scale = scale;
+      finalStepView.t2.scale = scale;
+      clampFinalStepPan('t1');
+      clampFinalStepPan('t2');
+      scheduleFinalStepTransformApply();
+      scheduleFinalSpineStepRender();
+    }
+
+    function wireFinalSpineStepControls(doc) {
+      if (!doc || doc.__finalSpineStepWired) return;
+      doc.__finalSpineStepWired = true;
+      const byId = (id) => doc.getElementById(id);
+      const bindClick = (id, handler) => {
+        const el = byId(id);
+        if (el) el.addEventListener('click', handler);
+      };
+      bindClick('fssBtnReviewed', () => classifyFinalSpineStep('reviewed'));
+      bindClick('fssBtnNewT2', () => classifyFinalSpineStep('new'));
+      bindClick('fssBtnLostT1', () => classifyFinalSpineStep('lost'));
+      bindClick('fssBtnIgnoreT1', () => classifyFinalSpineStep('ignore'));
+      bindClick('fssBtnIgnoreT2', () => classifyFinalSpineStep('ignore'));
+      bindClick('fssBtnArtifact', () => classifyFinalSpineStep('artifact'));
+      bindClick('fssZoom25', () => setFinalStepZoomBoth(0.25));
+      bindClick('fssZoom50', () => setFinalStepZoomBoth(0.5));
+      bindClick('fssZoom75', () => setFinalStepZoomBoth(0.75));
+      bindClick('fssZoom100', () => setFinalStepZoomBoth(1.0));
+      bindClick('fssZoom200', () => setFinalStepZoomBoth(2.0));
+      bindClick('fssZoomFocus', () => {
+        const cur = finalSpineStep.queue[finalSpineStep.idx];
+        const p1 = finalStepCache.p1;
+        const p2 = finalStepCache.p2;
+        if (cur && finalStepCropOk(p1) && finalStepCropOk(p2)) {
+          focusFinalStepOnLoadedCrops(cur, p1, p2);
+        } else if (cur) {
+          centerFinalStepOnSpine(cur);
+          finalStepAlignZOnFetch = true;
+          renderFinalSpineStep(true);
+        }
+        scheduleFinalSpineStepRender();
+      });
+
+      const suggestChk = byId('fssSuggestByClick');
+      if (suggestChk) {
+        suggestChk.addEventListener('change', () => {
+          updateFinalStepSuggestHint();
+          if (!suggestChk.checked) {
+            finalStepSuggest = { t1: null, t2: null };
+            scheduleFinalSpineStepRender();
+          }
+        });
+      }
+
+      ['fssSliceT1', 'fssSliceT2', 'fssBrightness', 'fssContrast'].forEach((id) => {
+        const el = byId(id);
+        if (!el) return;
+        el.addEventListener('input', () => {
+          if (id === 'fssSliceT1' || id === 'fssSliceT2') renderFinalSpineStep(true);
+          else scheduleFinalSpineStepRender();
+        });
+      });
+
+      const setupWheel = (canvasId, sliceId) => {
+        const canvas = byId(canvasId);
+        if (!canvas) return;
+        canvas.addEventListener('wheel', (ev) => {
+          if (!finalSpineStep.active) return;
+          ev.preventDefault();
+          const z = byId(sliceId);
+          if (!z) return;
+          const min = Number(z.min), max = Number(z.max), cur = Number(z.value || 0);
+          const next = Math.max(min, Math.min(max, cur + (ev.deltaY > 0 ? 1 : -1)));
+          z.value = String(next);
+          renderFinalSpineStep(true);
+        }, { passive: false });
+        canvas.addEventListener('click', (ev) => {
+          if (finalStepDrag.moved) { finalStepDrag.moved = false; return; }
+          const pane = canvasId === 'fssCanvasT1' ? 't1' : 't2';
+          if (byId('fssSuggestByClick')?.checked) {
+            void suggestFinalStepByClick(pane, ev);
+            return;
+          }
+          focusFinalStepPaneAtEvent(pane, ev);
+        });
+        canvas.addEventListener('dblclick', (ev) => {
+          ev.preventDefault();
+          const cur = finalSpineStep.queue[finalSpineStep.idx];
+          const p1 = finalStepCache.p1;
+          const p2 = finalStepCache.p2;
+          if (cur && finalStepCropOk(p1) && finalStepCropOk(p2)) {
+            focusFinalStepOnLoadedCrops(cur, p1, p2);
+          }
+          scheduleFinalSpineStepRender();
+        });
+      };
+      setupWheel('fssCanvasT1', 'fssSliceT1');
+      setupWheel('fssCanvasT2', 'fssSliceT2');
+
+      ['fssCanvasT1', 'fssCanvasT2'].forEach((canvasId) => {
+        const canvas = byId(canvasId);
+        if (!canvas) return;
+        const pane = canvasId === 'fssCanvasT1' ? 't1' : 't2';
+        canvas.addEventListener('mousedown', (ev) => {
+          if (!finalSpineStep.active) return;
+          finalStepDrag.active = true;
+          finalStepDrag.pane = pane;
+          finalStepDrag.moved = false;
+          finalStepDrag.startX = ev.clientX;
+          finalStepDrag.startY = ev.clientY;
+          finalStepDrag.startTx = finalStepView[pane].tx;
+          finalStepDrag.startTy = finalStepView[pane].ty;
+          const vp = byId(pane === 't1' ? 'fssViewportT1' : 'fssViewportT2');
+          if (vp) vp.classList.add('grabbing');
+          ev.preventDefault();
+        });
+      });
+
+      doc.addEventListener('mousemove', (ev) => {
+        if (!finalStepDrag.active || !finalStepDrag.pane || !finalSpineStep.active) return;
+        finalStepDrag.pendingDx = ev.clientX - finalStepDrag.startX;
+        finalStepDrag.pendingDy = ev.clientY - finalStepDrag.startY;
+        if (Math.abs(finalStepDrag.pendingDx) > 3 || Math.abs(finalStepDrag.pendingDy) > 3) finalStepDrag.moved = true;
+        scheduleFinalStepTransformApply();
+      }, { passive: true });
+
+      doc.addEventListener('mouseup', () => {
+        if (finalStepDrag.pane) {
+          const vp = byId(finalStepDrag.pane === 't1' ? 'fssViewportT1' : 'fssViewportT2');
+          if (vp) vp.classList.remove('grabbing');
+        }
+        finalStepDrag.active = false;
+        finalStepDrag.pane = null;
+        setTimeout(() => { finalStepDrag.moved = false; }, 0);
+      });
+
+      doc.addEventListener('keydown', (ev) => {
+        if (!finalSpineStep.active || finalSpineStep.inFlight) return;
+        if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        const tag = String(ev.target?.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+        const cur = finalSpineStep.queue[finalSpineStep.idx];
+        if (!cur) return;
+        const isT1 = String(cur.timepoint).toLowerCase() === 't1';
+        const isT2 = String(cur.timepoint).toLowerCase() === 't2';
+        const unlinked = !!cur.is_unlinked_dendrite;
+        if ((ev.key === 'r' || ev.key === 'R') && unlinked) { ev.preventDefault(); classifyFinalSpineStep('reviewed'); return; }
+        if (unlinked) {
+          if (ev.key === 'a' || ev.key === 'A') { ev.preventDefault(); classifyFinalSpineStep('artifact'); return; }
+          if (ev.key === '1' && isT1) { ev.preventDefault(); classifyFinalSpineStep('ignore'); return; }
+          if (ev.key === '2' && isT2) { ev.preventDefault(); classifyFinalSpineStep('ignore'); return; }
+          return;
+        }
+        if ((ev.key === 'n' || ev.key === 'N') && isT2) { ev.preventDefault(); classifyFinalSpineStep('new'); return; }
+        if ((ev.key === 'l' || ev.key === 'L') && isT1) { ev.preventDefault(); classifyFinalSpineStep('lost'); return; }
+        if (ev.key === '1' && isT1) { ev.preventDefault(); classifyFinalSpineStep('ignore'); return; }
+        if (ev.key === '2' && isT2) { ev.preventDefault(); classifyFinalSpineStep('ignore'); return; }
+        if (ev.key === 'a' || ev.key === 'A') { ev.preventDefault(); classifyFinalSpineStep('artifact'); return; }
+      });
+    }
+
     async function exportResults() {
       if (!sessionLoaded) {
         setOut('Please click "Choose Files and Load" first.');
         return;
       }
+      if (finalSpineStep.active) {
+        ensureFinalSpineStepWindow();
+        setOut('Final Spine Step is active. Classify all remaining spines before export completes.');
+        return;
+      }
       const outputName = window.prompt('Export folder name (optional):', 'spine_annotator_export') || '';
-      const resp = await fetch('/results/export', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ use_dialog: true, output_name: outputName })
-      });
+      const resp = await submitExport(outputName);
       const data = await resp.json();
       if (!resp.ok) {
         const msg = (typeof data?.detail === 'string' && data.detail)
           ? data.detail
           : (`Export failed: ${JSON.stringify(data)}`);
         alert(msg);
+        const blockedCount = parseBlockedUnclassifiedCount(msg);
+        if (blockedCount > 0) {
+          await startFinalSpineStepAfterBlockedExport(outputName);
+        }
+        return;
       }
+      finalSpineStep.active = false;
       setOut(data);
     }
 
@@ -3874,15 +5209,15 @@ def simple_home() -> str:
         };
       }
       const t2PreviewBody = {
-        timepoint: 't2',
-        spine_id: String(pickedT2),
-        width: 1024,
-        height: 1024,
-        depth: 21,
-        projection: 'slice',
-        slice_z_mode: 'stack_global',
-        slice_index: sliceT2Req,
-      };
+          timepoint: 't2',
+          spine_id: String(pickedT2),
+          width: 1024,
+          height: 1024,
+          depth: 21,
+          projection: 'slice',
+          slice_z_mode: 'stack_global',
+          slice_index: sliceT2Req,
+        };
       const [p2, p1] = await Promise.all([
         fetch('/crops/preview', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(t2PreviewBody)}).then(r=>r.json()),
         fetch('/crops/preview', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(p1Body)}).then(r=>r.json()),
@@ -3924,14 +5259,6 @@ def simple_home() -> str:
       if (!row) return;
       let t2 = String(modalEl('modalT2Pick')?.value || document.getElementById(`q-t2-pick-${i}`)?.value || row.t2_spine_id || '').trim();
       let t1 = String(modalEl('modalT1Pick')?.value || document.getElementById(`q-t1-pick-${i}`)?.value || row.suggested_t1_spine_id || '').trim();
-      const q2 = document.getElementById(`q-t2-pick-${i}`);
-      const q1 = document.getElementById(`q-t1-pick-${i}`);
-      if (q2 && t2) q2.value = t2;
-      if (q1 && t1) q1.value = t1;
-      if ((action === 'ignore_t1' || action === 'remove_t1' || action === 'match') && !t1) {
-        setOut('No T1 spine selected. Choose a T1 in the large viewer (or queue card) first.');
-        return;
-      }
       if (newValidationLargeContext.active) {
         await handleFinalPassDecision(action, t1);
         return;
@@ -4024,6 +5351,14 @@ def simple_home() -> str:
           if (!isDetachedCompareOpen()) closeCompareModal();
           return;
         }
+      }
+      const q2 = document.getElementById(`q-t2-pick-${i}`);
+      const q1 = document.getElementById(`q-t1-pick-${i}`);
+      if (q2 && t2) q2.value = t2;
+      if (q1 && t1) q1.value = t1;
+      if ((action === 'ignore_t1' || action === 'remove_t1' || action === 'match') && !t1) {
+        setOut('No T1 spine selected. Choose a T1 in the large viewer (or queue card) first.');
+        return;
       }
       const didManualCommit = reviewMode !== 'algo' && MANUAL_COMMIT_ACTIONS.has(String(action || ''));
       await setDecision(i, action);
@@ -4906,6 +6241,116 @@ def review_decision(payload: models.ReviewDecisionRequest) -> models.ReviewDecis
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/review/unclassified-cleanup-queue", response_model=models.CleanupQueueResponse)
+def review_unclassified_cleanup_queue() -> models.CleanupQueueResponse:
+    try:
+        session = session_store.require_active_session()
+        items, orphan_ids, unclassified_count, unreviewed_unlinked_count = _build_final_review_queue_items(session)
+        total = int(unclassified_count + unreviewed_unlinked_count)
+        return models.CleanupQueueResponse(
+            total_unclassified=total,
+            unreviewed_unlinked_count=unreviewed_unlinked_count,
+            queueable_count=len(items),
+            orphan_ids=orphan_ids,
+            items=items,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/review/unclassified-cleanup/classify", response_model=models.CleanupClassifyResponse)
+def review_unclassified_cleanup_classify(payload: models.CleanupClassifyRequest) -> models.CleanupClassifyResponse:
+    try:
+        session = session_store.require_active_session()
+        sid = str(payload.spine_id)
+        tp = str(payload.timepoint)
+        cls = str(payload.classification)
+        _capture_undo_snapshot(session, f"cleanup:{tp}:{sid}:{cls}")
+        excluded_t1_nonmatch, excluded_t2_nonmatch, _rows = _collect_non_matched_dendrite_spines(session)
+        is_unlinked = _is_unlinked_spine(
+            session,
+            tp,
+            sid,
+            excluded_t1_nonmatch=excluded_t1_nonmatch,
+            excluded_t2_nonmatch=excluded_t2_nonmatch,
+        )
+        if tp == "t2":
+            if sid not in session.t2_lookup:
+                row, resolved = _resolve_spine_lookup(session, "t2", sid)
+                if not row:
+                    raise ValueError(f"Unknown t2 spine '{sid}'.")
+                sid = resolved
+            if is_unlinked:
+                if cls == "reviewed":
+                    _mark_unlinked_reviewed(session, tp, sid)
+                    msg = f"Marked unlinked T2 spine '{sid}' as visually reviewed."
+                elif cls == "artifact":
+                    _mark_unlinked_reviewed(session, tp, sid)
+                    _set_unlinked_disposition(session, tp, sid, "artifact")
+                    msg = f"Marked unlinked T2 spine '{sid}' as reviewed + artifact."
+                elif cls == "ignore":
+                    _mark_unlinked_reviewed(session, tp, sid)
+                    _set_unlinked_disposition(session, tp, sid, "ignore")
+                    msg = f"Marked unlinked T2 spine '{sid}' as reviewed + ignored."
+                else:
+                    raise ValueError(
+                        "For unlinked T2 spines, classification must be one of: reviewed, artifact, ignore."
+                    )
+            else:
+                if cls == "reviewed":
+                    raise ValueError("Use biological cleanup actions for linked-dendrite T2 spines.")
+                if cls == "new":
+                    session.new_t2_ids.add(sid)
+                elif cls == "artifact":
+                    session.removed_t2_ids.add(sid)
+                elif cls == "ignore":
+                    session.ignored_t2_ids.add(sid)
+                else:
+                    raise ValueError("For T2 cleanup, classification must be one of: new, artifact, ignore.")
+                session.algo_matches.pop(sid, None)
+                session.review_decisions.pop(sid, None)
+                msg = f"Classified T2 spine '{sid}' as {cls}."
+        else:
+            if sid not in session.t1_lookup:
+                row, resolved = _resolve_spine_lookup(session, "t1", sid)
+                if not row:
+                    raise ValueError(f"Unknown t1 spine '{sid}'.")
+                sid = resolved
+            if is_unlinked:
+                if cls == "reviewed":
+                    _mark_unlinked_reviewed(session, tp, sid)
+                    msg = f"Marked unlinked T1 spine '{sid}' as visually reviewed."
+                elif cls == "artifact":
+                    _mark_unlinked_reviewed(session, tp, sid)
+                    _set_unlinked_disposition(session, tp, sid, "artifact")
+                    msg = f"Marked unlinked T1 spine '{sid}' as reviewed + artifact."
+                elif cls == "ignore":
+                    _mark_unlinked_reviewed(session, tp, sid)
+                    _set_unlinked_disposition(session, tp, sid, "ignore")
+                    msg = f"Marked unlinked T1 spine '{sid}' as reviewed + ignored."
+                else:
+                    raise ValueError(
+                        "For unlinked T1 spines, classification must be one of: reviewed, artifact, ignore."
+                    )
+            else:
+                if cls == "reviewed":
+                    raise ValueError("Use biological cleanup actions for linked-dendrite T1 spines.")
+                if cls == "lost":
+                    session.lost_t1_ids.add(sid)
+                elif cls == "artifact":
+                    session.removed_t1_ids.add(sid)
+                elif cls == "ignore":
+                    session.ignored_t1_ids.add(sid)
+                else:
+                    raise ValueError("For T1 cleanup, classification must be one of: lost, artifact, ignore.")
+                msg = f"Classified T1 spine '{sid}' as {cls}."
+        _rebuild_decision_state(session)
+        _save_last_session()
+        return models.CleanupClassifyResponse(ok=True, message=msg)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/review/decision/{t2_spine_id}/undo", response_model=models.ReviewUndoResponse)
 def undo_review_decision(t2_spine_id: str) -> models.ReviewUndoResponse:
     try:
@@ -5311,19 +6756,11 @@ def review_counters() -> models.ReviewCountersResponse:
         queue = _build_review_queue(offset=0, limit=100000, use_local_registration=False, nearby_xy=140.0)
         to_review = int(queue.total_candidates)
         excluded_t1_nonmatch, excluded_t2_nonmatch, _rows = _collect_non_matched_dendrite_spines(session)
-        matched_t2 = set(str(k) for k in session.algo_matches.keys())
-        matched_t1 = set(str(v.get("t1_spine_id", "")) for v in session.algo_matches.values() if v.get("t1_spine_id"))
-        for row in session.review_decisions.values():
-            if str(row.get("action", "")) in {"match", "manual_match"} and row.get("t1_spine_id"):
-                matched_t2.add(str(row.get("t2_spine_id", "")))
-                matched_t1.add(str(row.get("t1_spine_id", "")))
-        not_in_t1_t2 = _collect_not_in_t1_t2_ids(session) - excluded_t2_nonmatch
-        removed_t1 = set(str(x) for x in session.removed_t1_ids) - excluded_t1_nonmatch
-        removed_t2 = (set(str(x) for x in session.removed_t2_ids) - excluded_t2_nonmatch) - not_in_t1_t2
-        ignored_t1 = set(str(x) for x in session.ignored_t1_ids) - excluded_t1_nonmatch
-        ignored_t2 = (set(str(x) for x in session.ignored_t2_ids) - excluded_t2_nonmatch).union(not_in_t1_t2)
-        new_t2 = set(str(x) for x in session.new_t2_ids) - excluded_t2_nonmatch
-        lost_t1 = set(str(x) for x in session.lost_t1_ids) - excluded_t1_nonmatch
+        matched_t1, matched_t2, new_t2, lost_t1, removed_t1, removed_t2, ignored_t1, ignored_t2 = _current_classification_sets(
+            session,
+            excluded_t1_nonmatch=excluded_t1_nonmatch,
+            excluded_t2_nonmatch=excluded_t2_nonmatch,
+        )
         unclassified_t1, unclassified_t2 = _strict_export_unclassified_counts(
             session,
             excluded_t1_nonmatch=excluded_t1_nonmatch,
@@ -5601,49 +7038,64 @@ def export_results(payload: models.ExportResultsRequest | None = None) -> models
             matched_df = matched_df.drop_duplicates(subset=["t2_spine_id"], keep="first")
         matched_df.to_csv(out_dir / "matched.csv", index=False)
 
-        matched_t2 = set(matched_df["t2_spine_id"].astype(str).tolist()) if not matched_df.empty else set()
-        matched_t1 = set(matched_df["t1_spine_id"].astype(str).tolist()) if not matched_df.empty else set()
+        # Strict classification buckets — same logic as Final Spine Step cleanup queue.
+        (
+            gate_matched_t1,
+            gate_matched_t2,
+            new_t2,
+            lost_t1,
+            removed_t1,
+            removed_t2,
+            ignored_t1,
+            ignored_t2,
+            unclassified_t1,
+            unclassified_t2,
+        ) = _strict_unclassified_snapshot(session)
 
-        # Strict classification buckets only.
-        # Legacy "not_in_t1" decisions are folded into ignored_t2.
-        not_in_t1_t2 = _collect_not_in_t1_t2_ids(session) - excluded_t2_nonmatch
-        removed_t2 = (set(str(x) for x in session.removed_t2_ids) - excluded_t2_nonmatch) - not_in_t1_t2
-        removed_t1 = set(str(x) for x in session.removed_t1_ids) - excluded_t1_nonmatch
-        ignored_t2 = (set(str(x) for x in session.ignored_t2_ids) - excluded_t2_nonmatch).union(not_in_t1_t2)
-        ignored_t1 = set(str(x) for x in session.ignored_t1_ids) - excluded_t1_nonmatch
-        explicit_new_t2 = set(str(x) for x in session.new_t2_ids) - excluded_t2_nonmatch
-        explicit_lost_t1 = set(str(x) for x in session.lost_t1_ids) - excluded_t1_nonmatch
+        (
+            total_blockers,
+            unclassified_count,
+            unreviewed_unlinked_count,
+            _u1,
+            _u2,
+            unreviewed_unlinked_t1,
+            unreviewed_unlinked_t2,
+        ) = _export_visual_review_blockers(session)
 
-        new_t2 = set(explicit_new_t2)
-        lost_t1 = set(explicit_lost_t1)
+        if total_blockers > 0:
+            samples: list[str] = []
+            samples.extend(sorted(unclassified_t1)[:3])
+            samples.extend(f"T2:{x}" for x in sorted(unclassified_t2)[:3])
+            samples.extend(f"unlinked-T1:{x}" for x in sorted(unreviewed_unlinked_t1)[:3])
+            samples.extend(f"unlinked-T2:{x}" for x in sorted(unreviewed_unlinked_t2)[:3])
+            detail = ", ".join(str(x) for x in samples[:8])
+            raise ValueError(
+                f"Export Blocked: You have {total_blockers} spines requiring final visual review "
+                f"({unclassified_count} unclassified, {unreviewed_unlinked_count} unlinked dendrite). "
+                "Every spine must be matched, marked as new/lost, flagged as artifact/ignored, "
+                "or visually reviewed (unlinked dendrite) before saving."
+                + (f" Examples: {detail}" if detail else "")
+            )
 
-        # Hard validation gate: block export if anything remains unclassified.
-        unclassified_t1, unclassified_t2 = _strict_export_unclassified_counts(
+        _ = gate_matched_t1
+        _ = gate_matched_t2
+
+        unlinked_removed_t1, unlinked_removed_t2, unlinked_ignored_t1, unlinked_ignored_t2 = _unlinked_disposition_exports(
             session,
             excluded_t1_nonmatch=excluded_t1_nonmatch,
             excluded_t2_nonmatch=excluded_t2_nonmatch,
-            matched_t1=matched_t1,
-            matched_t2=matched_t2,
-            new_t2=new_t2,
-            lost_t1=lost_t1,
-            removed_t1=removed_t1,
-            removed_t2=removed_t2,
-            ignored_t1=ignored_t1,
-            ignored_t2=ignored_t2,
         )
-        unclassified_count = int(len(unclassified_t1) + len(unclassified_t2))
-        if unclassified_count > 0:
-            raise ValueError(
-                f"Export Blocked: You have {unclassified_count} unclassified spines remaining. "
-                "Every spine must be matched, marked as new/lost, or flagged as an artifact/ignored before saving."
-            )
+        removed_t1_export = sorted(set(removed_t1).union(unlinked_removed_t1))
+        removed_t2_export = sorted(set(removed_t2).union(unlinked_removed_t2))
+        ignored_t1_export = sorted(set(ignored_t1).union(unlinked_ignored_t1))
+        ignored_t2_export = sorted(set(ignored_t2).union(unlinked_ignored_t2))
 
         pd.DataFrame({"t2_spine_id": sorted(list(new_t2))}).to_csv(out_dir / "new.csv", index=False)
         pd.DataFrame({"t1_spine_id": sorted(list(lost_t1))}).to_csv(out_dir / "lost.csv", index=False)
-        pd.DataFrame({"t1_spine_id": sorted(list(removed_t1))}).to_csv(out_dir / "removed_t1.csv", index=False)
-        pd.DataFrame({"t2_spine_id": sorted(list(removed_t2))}).to_csv(out_dir / "removed_t2.csv", index=False)
-        pd.DataFrame({"t1_spine_id": sorted(list(ignored_t1))}).to_csv(out_dir / "ignored_t1.csv", index=False)
-        pd.DataFrame({"t2_spine_id": sorted(list(ignored_t2))}).to_csv(out_dir / "ignored_t2.csv", index=False)
+        pd.DataFrame({"t1_spine_id": removed_t1_export}).to_csv(out_dir / "removed_t1.csv", index=False)
+        pd.DataFrame({"t2_spine_id": removed_t2_export}).to_csv(out_dir / "removed_t2.csv", index=False)
+        pd.DataFrame({"t1_spine_id": ignored_t1_export}).to_csv(out_dir / "ignored_t1.csv", index=False)
+        pd.DataFrame({"t2_spine_id": ignored_t2_export}).to_csv(out_dir / "ignored_t2.csv", index=False)
 
         rejected_rows = []
         for k in sorted(session.rejected_pairs):
@@ -5653,9 +7105,25 @@ def export_results(payload: models.ExportResultsRequest | None = None) -> models
         pd.DataFrame(rejected_rows, columns=["t1_spine_id", "t2_spine_id"]).to_csv(
             out_dir / "rejected_pairs.csv", index=False
         )
+        excluded_export_rows: list[dict[str, str]] = []
+        reviewed_t1 = {_canonical_spine_id(x) for x in session.reviewed_unlinked_t1_ids}
+        reviewed_t2 = {_canonical_spine_id(x) for x in session.reviewed_unlinked_t2_ids}
+        for row in excluded_nonmatch_rows:
+            tp = str(row.get("timepoint", "")).lower()
+            sid = _canonical_spine_id(row.get("spine_id", ""))
+            key = _unlinked_spine_key(tp, sid)
+            reviewed = sid in (reviewed_t1 if tp == "t1" else reviewed_t2)
+            disp = str(session.unlinked_spine_dispositions.get(key, "")).strip()
+            excluded_export_rows.append(
+                {
+                    **row,
+                    "visual_review": "reviewed" if reviewed else "pending",
+                    "user_disposition": disp if disp else "excluded_dendrite_default",
+                }
+            )
         pd.DataFrame(
-            excluded_nonmatch_rows,
-            columns=["timepoint", "spine_id", "dendrite_id", "reason"],
+            excluded_export_rows,
+            columns=["timepoint", "spine_id", "dendrite_id", "reason", "visual_review", "user_disposition"],
         ).to_csv(out_dir / "excluded_non_matched_dendrite_spines.csv", index=False)
         pd.DataFrame(
             session.manual_t2_click_spines,
