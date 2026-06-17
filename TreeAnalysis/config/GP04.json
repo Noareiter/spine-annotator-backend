@@ -1,0 +1,71 @@
+{
+  "animal_id": "GP04",
+  "_comment": "Per-animal TreeAnalysis configuration. Units: micrometres (um). Copy this file per animal and edit values. animal_id names the output folders. Paths may be relative to the respan/imaging root or absolute; use forward slashes.",
+
+  "axis_convention": {
+    "_comment": "Sign applied to pixel-offset-from-center when converting to stage um. +1 keeps the stage sign; flip to -1 if overlapping-FOV QC disagrees. PrairieView often needs sign_y = -1.",
+    "sign_x": 1,
+    "sign_y": 1,
+    "stage_position_is_center": true
+  },
+
+    "whole_cell": {
+    "_comment": "One-time low-zoom overview + its SNT trace. SWC z is a slice index (z-voxel=1); z_schedule converts it to true depth.",
+    "pvscan_xml": "E:/Noa/Pons - layer 5/Imaging/GP04/26_02_17/1_aligned/TSeries-02172026-1117-001/TSeries-02172026-1117-001.xml",
+    "swc": "E:/Noa/Pons - layer 5/Imaging/GP04/26_02_17/fov1-exported-000.swc",
+    "tiff_stack": "E:/Noa/Pons - layer 5/Imaging/GP04/26_02_17/fov1.tif",
+    "z_schedule": {
+      "_comment": "From depth.txt: 2 um/slice up to slice 177, then 4 um/slice. breakpoints = last slice of each segment; steps = breakpoints+1 entries.",
+      "z0_um": 0.0,
+      "breakpoints": [177],
+      "steps": [2.0, 4.0]
+    }
+  },
+
+  "sessions": {
+    "_comment": "One entry per imaging timepoint. Each session's high-mag FOVs share one stage origin and stitch by stage coordinates. swc may be a single .swc file or a folder of .swc fragments.",
+    "pre-droplet": {
+      "_comment": "manual_registration: JSON from manual_register_endpoints.html (recommended) or manual_register_tiff.html. Takes priority over branchpoint_pairs.",
+      "manual_registration": "config/manual_registration_pre-droplet.json",
+      "branchpoint_pairs": "",
+      "fovs": [
+        {
+          "fov": 1,
+          "pvscan_xml": "E:/Noa/Pons - layer 5/Imaging/GP04/26_02_23/1_aligned/TSeries-02232026-1558-001/TSeries-02232026-1558-001.xml",
+          "respan_detected_spines": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/Tables/fov1_detected_spines - t1.csv",
+          "swc": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/fov1Swc"
+        },
+        {
+          "fov": 2,
+          "pvscan_xml": "E:/Noa/Pons - layer 5/Imaging/GP04/26_02_23/2_aligned/TSeries-02232026-1558-002/TSeries-02232026-1558-002.xml",
+          "respan_detected_spines": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/Tables/fov2_detected_spines - t1.csv",
+          "swc": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/fov2Swc"
+        },
+        {
+          "fov": 3,
+          "pvscan_xml": "E:/Noa/Pons - layer 5/Imaging/GP04/26_02_23/3_aligned/TSeries-02232026-1558-003/TSeries-02232026-1558-003.xml",
+          "respan_detected_spines": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/Tables/fov3_detected_spines - t1.csv",
+          "swc": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/fov3Swc"
+        },
+        {
+          "fov": 4,
+          "pvscan_xml": "E:/Noa/Pons - layer 5/Imaging/GP04/26_02_23/4_aligned/TSeries-02232026-1558-004/TSeries-02232026-1558-004.xml",
+          "respan_detected_spines": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/Tables/fov4_detected_spines - t1.csv",
+          "swc": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/fov4Swc"
+        },
+        {
+          "fov": 5,
+          "pvscan_xml": "E:/Noa/Pons - layer 5/Imaging/GP04/26_02_23/5_aligned/TSeries-02232026-1558-005/TSeries-02232026-1558-005.xml",
+          "respan_detected_spines": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/Tables/fov5_detected_spines- t1.csv",
+          "swc": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/fov5Swc"
+        },
+        {
+          "fov": 6,
+          "pvscan_xml": "E:/Noa/Pons - layer 5/Imaging/GP04/26_02_23/6_aligned/TSeries-02232026-1558-006/TSeries-02232026-1558-006.xml",
+          "respan_detected_spines": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/Tables/fov6_detected_spines - t1.csv",
+          "swc": "E:/Noa/Pons - layer 5/Imaging/GP04/respan/pre-droplet/fov6Swc"
+        }
+      ]
+    }
+  }
+}

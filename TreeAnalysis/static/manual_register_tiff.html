@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TreeAnalysis — Whole-cell TIFF Registration</title>
+  <style>
+    :root {
+      --bg: #121212; --panel: #1a1a1a; --border: #2e2e2e;
+      --text: #e8e8e8; --muted: #8a8a8a; --accent: #4a90d9; --warn: #e07040;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg); color: var(--text);
+      height: 100vh; display: grid;
+      grid-template-columns: 300px 1fr; overflow: hidden;
+    }
+    aside {
+      background: var(--panel); border-right: 1px solid var(--border);
+      padding: 14px; overflow-y: auto; font-size: 13px;
+    }
+    h1 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    h2 {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--muted); margin: 14px 0 8px;
+    }
+    p.hint { color: var(--muted); font-size: 12px; line-height: 1.45; margin-bottom: 8px; }
+    label { display: block; margin: 8px 0 4px; color: var(--muted); font-size: 11px; }
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+    button {
+      width: 100%; font: inherit; background: var(--accent); color: #fff;
+      border: none; border-radius: 4px; padding: 8px 10px; cursor: pointer;
+      font-weight: 600; margin-top: 6px;
+    }
+    button.secondary { background: #333; color: var(--text); }
+    button.active-mode { outline: 2px solid var(--accent); }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+    .row { display: flex; gap: 6px; }
+    .row button { flex: 1; margin-top: 0; }
+    .val { float: right; color: var(--text); font-variant-numeric: tabular-nums; }
+    .fov-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 8px; border-radius: 4px; cursor: pointer;
+      border: 1px solid transparent; margin-bottom: 4px;
+    }
+    .fov-item:hover { background: #252525; }
+    .fov-item.active { border-color: var(--accent); background: #222; }
+    .swatch { width: 12px; height: 12px; border-radius: 2px; flex-shrink: 0; }
+    main { position: relative; background: #0a0a0a; min-width: 0; }
+    #canvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+    #hud {
+      position: absolute; top: 10px; left: 10px; z-index: 2;
+      background: rgba(0,0,0,0.6); padding: 8px 10px; border-radius: 4px;
+      font-size: 11px; color: var(--muted); line-height: 1.55; pointer-events: none;
+    }
+    #status { color: var(--warn); font-size: 12px; margin-top: 8px; min-height: 18px; }
+    .kbd { background: #333; padding: 1px 5px; border-radius: 3px; color: #ccc; font-size: 10px; }
+    code { font-size: 11px; color: #aaa; }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>SWC registration</h1>
+    <p class="hint">הלבשת SWC של FOV (צבע) על SWC התא (אפור). השתמש ב-Z slice + Rotate ליישור XY. אופציונלי: רקע TIFF.</p>
+    <div id="status">Loading…</div>
+
+    <h2>Display</h2>
+    <label><input type="checkbox" id="showTiff" checked /> Show TIFF background</label>
+    <label><input type="checkbox" id="showCellSwc" checked /> Whole-cell SWC (grey)</label>
+    <div class="row" style="margin-top:6px">
+      <button class="secondary" id="btnSwcOnly">SWC on SWC only</button>
+    </div>
+
+    <h2>View mode</h2>
+    <div class="row">
+      <button class="secondary" id="modeMip">All Z (MIP)</button>
+      <button class="secondary active-mode" id="modeSlice">Z slice</button>
+    </div>
+
+    <h2>Z depth</h2>
+    <label>Slice <span class="val" id="zVal">—</span></label>
+    <input type="range" id="zSlider" min="0" max="1" step="1" value="0" disabled />
+    <label>SWC slab (slices) <span class="val" id="zSlabVal">3</span></label>
+    <input type="range" id="zSlab" min="1" max="20" step="1" value="3" />
+    <label>Contrast <span class="val" id="contrastVal">1.0</span></label>
+    <input type="range" id="contrast" min="50" max="200" step="5" value="100" />
+
+    <h2>Active FOV</h2>
+    <div id="fovList"></div>
+    <div class="row" style="margin-top:8px">
+      <button class="secondary active-mode" id="modeMove">Move</button>
+      <button class="secondary" id="modeRotate">Rotate</button>
+    </div>
+    <p class="hint"><span class="kbd">Drag</span> move · <span class="kbd">Shift+drag</span> rotate · <span class="kbd">Scroll</span> zoom · <span class="kbd">↑↓</span> Z</p>
+    <label>FOV line width <span class="val" id="fovWidthVal">6</span></label>
+    <input type="range" id="fovWidth" min="2" max="14" step="1" value="6" />
+    <button class="secondary" id="snapFov">Snap FOV to dendrite center</button>
+
+    <h2>Export</h2>
+    <button id="exportBtn" disabled>Download manual_registration.json</button>
+    <p class="hint">After JSON: run <code>export_manual_fov_swc.py</code> for SWC files in cell frame (Fiji).</p>
+  </aside>
+
+  <main>
+    <div id="hud">
+      Whole-cell SWC + active FOV SWC
+    </div>
+    <canvas id="canvas"></canvas>
+  </main>
+
+  <script type="importmap">
+  { "imports": { "three": "/static/vendor/three/three.module.js" } }
+  </script>
+  <script type="module">
+  if (window.location.protocol === 'file:') {
+    document.body.innerHTML = '<div style="padding:24px;color:#e8e8e8;background:#121212"><h1>Server required</h1><p>Run <code>start_manual_register.bat</code> then open <a href="http://127.0.0.1:8020/">http://127.0.0.1:8020/</a></p></div>';
+    throw new Error('use http server');
+  }
+
+  import * as THREE from 'three';
+
+  const API_TO_THREE = new THREE.Matrix4().set(1,0,0,0, 0,0,1,0, 0,-1,0,0, 0,0,0,1);
+  const THREE_TO_API = API_TO_THREE.clone().invert();
+
+  /** Multiply column-major 4×4 (stage µm → cell µm, API frame). */
+  function applyApiMatrix(m, x, y, z) {
+    if (!m) return [x, y, z];
+    const e = m.elements;
+    return [
+      e[0] * x + e[4] * y + e[8] * z + e[12],
+      e[1] * x + e[5] * y + e[9] * z + e[13],
+      e[2] * x + e[6] * y + e[10] * z + e[14],
+    ];
+  }
+
+  function translationApi(dx, dy, dz) {
+    const m = new THREE.Matrix4();
+    m.identity();
+    m.elements[12] = dx;
+    m.elements[13] = dy;
+    m.elements[14] = dz;
+    return m;
+  }
+
+  const state = {
+    scene: null,
+    viewMode: 'slice', // default: fast single-slice load
+    zPage: 0,
+    zSlab: 3,
+    contrast: 1,
+    showTiff: true,
+    showCellSwc: true,
+    bgLoading: false,
+    selectedFov: null,
+    interactMode: 'move', // 'move' | 'rotate'
+    fovMatrices: {},
+    fovColors: {},
+    view: { scale: 1, panX: 0, panY: 0 },
+    drag: { active: false, rotate: false, lastX: 0, lastY: 0, cx: 0, cy: 0, baseM: null, startAngle: 0 },
+    fovLineWidth: 6,
+    fovPlaced: {},
+    needsDraw: true,
+  };
+
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+
+  function umToPx(xUm, yUm, mpp) {
+    return [xUm / mpp[0], yUm / mpp[1]];
+  }
+
+  function applyFovMatrix(fovId, xUm, yUm, zUm) {
+    return applyApiMatrix(state.fovMatrices[fovId], xUm, yUm, zUm);
+  }
+
+  function currentZUm() {
+    const zpp = state.scene?.cell?.z_um_per_page;
+    if (!zpp || state.viewMode === 'mip') return null;
+    return zpp[state.zPage];
+  }
+
+  function visibleSlice(zA, zB, zCenter, slab, mipMode) {
+    if (mipMode) return true;
+    const lo = zCenter - slab;
+    const hi = zCenter + slab;
+    return (zA >= lo && zA <= hi) || (zB >= lo && zB <= hi) ||
+           (zA < lo && zB > hi) || (zB < lo && zA > hi);
+  }
+
+  function visibleUm(zA, zB, zCenterUm, slabUm, mipMode) {
+    if (mipMode || zCenterUm == null) return mipMode;
+    const lo = zCenterUm - slabUm;
+    const hi = zCenterUm + slabUm;
+    return (zA >= lo && zA <= hi) || (zB >= lo && zB <= hi) ||
+           (zA < lo && zB > hi) || (zB < lo && zA > hi);
+  }
+
+  function matrixFromOffsetUm(dx, dy, dz) {
+    return translationApi(dx, dy, dz);
+  }
+
+  function bestSliceForFov(fovId) {
+    const fov = state.scene?.fovs?.[fovId];
+    const zpp = state.scene?.cell?.z_um_per_page;
+    if (!fov?.centroid_stage_um || !zpp?.length) return state.zPage;
+    const [sx, sy, sz] = fov.centroid_stage_um;
+    const [, , czUm] = applyApiMatrix(state.fovMatrices[fovId], sx, sy, sz);
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < zpp.length; i++) {
+      const d = Math.abs(zpp[i] - czUm);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  function applyInitialPlacement(fovId) {
+    const fov = state.scene?.fovs?.[fovId];
+    if (!fov?.initial_offset_um) return;
+    const [dx, dy, dz] = fov.initial_offset_um;
+    state.fovMatrices[fovId] = matrixFromOffsetUm(dx, dy, dz);
+    state.fovPlaced[fovId] = true;
+  }
+
+  function drawFovSegments(segs, color, lineWidth, mipMode, clipFn, mapFn) {
+    const w = Math.max(state.fovLineWidth, lineWidth);
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 6;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = w + 1.5;
+    ctx.globalAlpha = 0.35;
+    for (const [a, b] of segs) {
+      let ax = a[0], ay = a[1], az = a[2];
+      let bx = b[0], by = b[1], bz = b[2];
+      if (mapFn) {
+        [ax, ay, az] = mapFn(ax, ay, az);
+        [bx, by, bz] = mapFn(bx, by, bz);
+      }
+      if (!clipFn(az, bz)) continue;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1.0;
+    ctx.lineWidth = w;
+    for (const [a, b] of segs) {
+      let ax = a[0], ay = a[1], az = a[2];
+      let bx = b[0], by = b[1], bz = b[2];
+      if (mapFn) {
+        [ax, ay, az] = mapFn(ax, ay, az);
+        [bx, by, bz] = mapFn(bx, by, bz);
+      }
+      if (!clipFn(az, bz)) continue;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawSegments(segs, color, lineWidth, mipMode, clipFn, mapFn) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.globalAlpha = mipMode ? 0.5 : 0.92;
+    for (const [a, b] of segs) {
+      let ax = a[0], ay = a[1], az = a[2];
+      let bx = b[0], by = b[1], bz = b[2];
+      if (mapFn) {
+        [ax, ay, az] = mapFn(ax, ay, az);
+        [bx, by, bz] = mapFn(bx, by, bz);
+      }
+      if (!clipFn(az, bz)) continue;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function slabUmForPage(zPage) {
+    const zpp = state.scene?.cell?.z_um_per_page;
+    if (!zpp?.length) return state.zSlab * 2;
+    const i = Math.min(zPage, zpp.length - 1);
+    const step = i < zpp.length - 1 ? Math.abs(zpp[i + 1] - zpp[i]) : Math.abs(zpp[i] - zpp[i - 1]);
+    return state.zSlab * step;
+  }
+
+  function draw() {
+    if (!state.scene) return;
+    const cell = state.scene.cell;
+    const mpp = cell.mpp;
+    const [wPx, hPx] = cell.size_px;
+    const panel = canvas.parentElement;
+    ctx.fillStyle = '#0a0a0a';
+    ctx.fillRect(0, 0, panel.clientWidth, panel.clientHeight);
+
+    ctx.save();
+    ctx.translate(state.view.panX, state.view.panY);
+    ctx.scale(state.view.scale, state.view.scale);
+
+    if (state.bgImage && state.showTiff) {
+      if (state.contrast !== 1) ctx.filter = `contrast(${state.contrast})`;
+      ctx.drawImage(state.bgImage, 0, 0, wPx, hPx);
+      ctx.filter = 'none';
+    }
+
+    const mipMode = state.viewMode === 'mip';
+    const zSlice = state.zPage + 1;
+    const slabSlices = state.zSlab;
+    const zCenterUm = currentZUm();
+    const slabUm = slabUmForPage(state.zPage);
+    const cellLw = (state.showTiff ? 1.2 : 2.5) / state.view.scale;
+
+    if (state.showCellSwc) {
+      drawSegments(
+        cell.segments_pixel,
+        state.showTiff ? '#8a8a8a' : '#b0b0b0',
+        cellLw,
+        mipMode,
+        (za, zb) => visibleSlice(za, zb, zSlice, slabSlices, mipMode),
+        null
+      );
+    }
+
+    if (state.selectedFov) {
+      const fov = state.scene.fovs[state.selectedFov];
+      const color = state.fovColors[state.selectedFov];
+      const mapFov = (xUm, yUm, zUm) => {
+        const [cx, cy, cz] = applyApiMatrix(state.fovMatrices[state.selectedFov], xUm, yUm, zUm);
+        const [px, py] = umToPx(cx, cy, mpp);
+        return [px, py, cz];
+      };
+      drawFovSegments(
+        fov.segments,
+        color,
+        2 / state.view.scale,
+        mipMode,
+        (za, zb) => visibleUm(za, zb, zCenterUm, slabUm, mipMode),
+        mapFov
+      );
+    }
+    ctx.restore();
+  }
+
+  function loop() {
+    if (state.needsDraw) {
+      draw();
+      state.needsDraw = false;
+    }
+    requestAnimationFrame(loop);
+  }
+
+  function markDirty() { state.needsDraw = true; }
+
+  async function loadBackground() {
+    if (state.bgLoading) return;
+    state.bgLoading = true;
+    const url = state.viewMode === 'mip'
+      ? '/api/cell/mip.png'
+      : `/api/cell/slice/${state.zPage}.png`;
+    try {
+      const img = new Image();
+      await new Promise((res, rej) => {
+        img.onload = res;
+        img.onerror = () => rej(new Error('TIFF load failed'));
+        img.src = url + '?t=' + Date.now();
+      });
+      state.bgImage = img;
+      markDirty();
+    } catch (e) {
+      if (state.viewMode === 'mip' && e.message === 'TIFF load failed') {
+        statusEl.textContent = 'MIP still building in background… try Z slice or wait a few seconds';
+        pollMipReady();
+      } else {
+        statusEl.textContent = e.message;
+      }
+    }
+    state.bgLoading = false;
+  }
+
+  async function pollMipReady() {
+    for (let i = 0; i < 60; i++) {
+      const r = await fetch('/api/status');
+      const st = await r.json();
+      if (st.mip_ready) {
+        statusEl.textContent = 'MIP ready — click All Z (MIP)';
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+
+  function fitView() {
+    if (!state.scene) return;
+    const [wPx, hPx] = state.scene.cell.size_px;
+    const panel = canvas.parentElement;
+    const sx = (panel.clientWidth - 40) / wPx;
+    const sy = (panel.clientHeight - 40) / hPx;
+    state.view.scale = Math.min(sx, sy);
+    state.view.panX = (panel.clientWidth - wPx * state.view.scale) / 2;
+    state.view.panY = (panel.clientHeight - hPx * state.view.scale) / 2;
+    markDirty();
+  }
+
+  function resize() {
+    const panel = canvas.parentElement;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = panel.clientWidth * dpr;
+    canvas.height = panel.clientHeight * dpr;
+    canvas.style.width = panel.clientWidth + 'px';
+    canvas.style.height = panel.clientHeight + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    markDirty();
+  }
+
+  function refreshFovList() {
+    const el = document.getElementById('fovList');
+    el.innerHTML = '';
+    for (const id of Object.keys(state.fovMatrices).sort()) {
+      const div = document.createElement('div');
+      div.className = 'fov-item' + (state.selectedFov === id ? ' active' : '');
+      div.innerHTML = `<span class="swatch" style="background:${state.fovColors[id]}"></span>${id}`;
+      div.onclick = () => selectFov(id);
+      el.appendChild(div);
+    }
+  }
+
+  function selectFov(id) {
+    state.selectedFov = id;
+    if (!state.fovPlaced[id]) applyInitialPlacement(id);
+    refreshFovList();
+    const bestZ = bestSliceForFov(id);
+    const zSl = document.getElementById('zSlider');
+    zSl.value = bestZ;
+    state.zPage = bestZ;
+    document.getElementById('zVal').textContent = `${state.zPage + 1} / ${state.scene.cell.n_pages}`;
+    if (state.viewMode === 'slice') loadBackground();
+    statusEl.textContent = `Active: ${id} — drag coloured SWC to align`;
+    statusEl.style.color = '#e8c030';
+    markDirty();
+  }
+
+  function screenToWorld(sx, sy) {
+    return {
+      x: (sx - state.view.panX) / state.view.scale,
+      y: (sy - state.view.panY) / state.view.scale,
+    };
+  }
+
+  function nudgeFov(dxUm, dyUm) {
+    if (!state.selectedFov) return;
+    const m = state.fovMatrices[state.selectedFov];
+    m.elements[12] += dxUm;
+    m.elements[13] += dyUm;
+    markDirty();
+  }
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 0.9 : 1.1;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    state.view.panX = mx - (mx - state.view.panX) * factor;
+    state.view.panY = my - (my - state.view.panY) * factor;
+    state.view.scale *= factor;
+    markDirty();
+  }, { passive: false });
+
+  canvas.addEventListener('mousedown', (e) => {
+    if (!state.selectedFov) return;
+    const rect = canvas.getBoundingClientRect();
+    state.drag.active = true;
+    state.drag.rotate = e.shiftKey || state.interactMode === 'rotate';
+    state.drag.lastX = e.clientX;
+    state.drag.lastY = e.clientY;
+    const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    const [wPx, hPx] = state.scene.cell.size_px;
+    state.drag.cx = wPx / 2;
+    state.drag.cy = hPx / 2;
+    if (state.drag.rotate) {
+      state.drag.baseM = state.fovMatrices[state.selectedFov].clone();
+      state.drag.startAngle = Math.atan2(w.y - state.drag.cy, w.x - state.drag.cx);
+    }
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!state.drag.active || !state.selectedFov) return;
+    const mpp = state.scene.cell.mpp;
+    const m = state.fovMatrices[state.selectedFov];
+    if (state.drag.rotate && state.drag.baseM) {
+      const rect = canvas.getBoundingClientRect();
+      const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+      const angle = Math.atan2(w.y - state.drag.cy, w.x - state.drag.cx) - state.drag.startAngle;
+      const fov = state.scene.fovs[state.selectedFov];
+      const mpp = state.scene.cell.mpp;
+      const cen = fov.centroid_stage_um || [0, 0, 0];
+      const [cxUm, cyUm] = applyApiMatrix(state.drag.baseM, cen[0], cen[1], cen[2]);
+      const cxPx = cxUm / mpp[0];
+      const cyPx = cyUm / mpp[1];
+      const t1 = new THREE.Matrix4().makeTranslation(cxUm, cyUm, 0);
+      const t2 = new THREE.Matrix4().makeTranslation(-cxUm, -cyUm, 0);
+      const rot = new THREE.Matrix4().makeRotationZ(-angle);
+      const combined = new THREE.Matrix4();
+      combined.multiply(t1).multiply(rot).multiply(t2);
+      m.copy(combined).multiply(state.drag.baseM);
+    } else {
+      const dx = (e.clientX - state.drag.lastX) / state.view.scale;
+      const dy = (e.clientY - state.drag.lastY) / state.view.scale;
+      m.elements[12] += dx * mpp[0];
+      m.elements[13] += dy * mpp[1];
+      state.drag.lastX = e.clientX;
+      state.drag.lastY = e.clientY;
+    }
+    markDirty();
+  });
+
+  window.addEventListener('mouseup', () => { state.drag.active = false; });
+
+  document.getElementById('modeMip').onclick = async () => {
+    state.viewMode = 'mip';
+    document.getElementById('modeMip').classList.add('active-mode');
+    document.getElementById('modeSlice').classList.remove('active-mode');
+    document.getElementById('zSlider').disabled = true;
+    await loadBackground();
+  };
+
+  document.getElementById('modeSlice').onclick = async () => {
+    state.viewMode = 'slice';
+    document.getElementById('modeSlice').classList.add('active-mode');
+    document.getElementById('modeMip').classList.remove('active-mode');
+    document.getElementById('zSlider').disabled = false;
+    await loadBackground();
+  };
+
+  document.getElementById('zSlider').addEventListener('input', async (e) => {
+    state.zPage = +e.target.value;
+    const n = state.scene.cell.n_pages;
+    document.getElementById('zVal').textContent = `${state.zPage + 1} / ${n}`;
+    if (state.viewMode === 'slice') await loadBackground();
+    else markDirty();
+  });
+
+  document.getElementById('zSlab').addEventListener('input', (e) => {
+    state.zSlab = +e.target.value;
+    document.getElementById('zSlabVal').textContent = state.zSlab;
+    markDirty();
+  });
+
+  document.getElementById('contrast').addEventListener('input', (e) => {
+    state.contrast = +e.target.value / 100;
+    document.getElementById('contrastVal').textContent = state.contrast.toFixed(1);
+    markDirty();
+  });
+
+  document.getElementById('showTiff').addEventListener('change', (e) => {
+    state.showTiff = e.target.checked;
+    markDirty();
+  });
+  document.getElementById('showCellSwc').addEventListener('change', (e) => {
+    state.showCellSwc = e.target.checked;
+    markDirty();
+  });
+  document.getElementById('btnSwcOnly').onclick = () => {
+    state.showTiff = false;
+    state.showCellSwc = true;
+    document.getElementById('showTiff').checked = false;
+    document.getElementById('showCellSwc').checked = true;
+    markDirty();
+    statusEl.textContent = 'SWC on SWC mode — align coloured FOV onto grey dendrite';
+  };
+
+  document.getElementById('modeMove').onclick = () => {
+    state.interactMode = 'move';
+    document.getElementById('modeMove').classList.add('active-mode');
+    document.getElementById('modeRotate').classList.remove('active-mode');
+  };
+  document.getElementById('modeRotate').onclick = () => {
+    state.interactMode = 'rotate';
+    document.getElementById('modeRotate').classList.add('active-mode');
+    document.getElementById('modeMove').classList.remove('active-mode');
+  };
+
+  document.getElementById('fovWidth').addEventListener('input', (e) => {
+    state.fovLineWidth = +e.target.value;
+    document.getElementById('fovWidthVal').textContent = state.fovLineWidth;
+    markDirty();
+  });
+
+  document.getElementById('snapFov').onclick = () => {
+    if (!state.selectedFov) return;
+    applyInitialPlacement(state.selectedFov);
+    markDirty();
+  };
+
+  document.getElementById('exportBtn').onclick = () => {
+    const fov_transforms = {};
+    for (const [fovId, m] of Object.entries(state.fovMatrices)) {
+      const cm = m.elements;
+      const rm = [];
+      for (let r = 0; r < 4; r++)
+        for (let c = 0; c < 4; c++) rm.push(cm[c * 4 + r]);
+      fov_transforms[fovId] = { matrix4_column_major: [...cm], matrix4_row_major: rm };
+    }
+    const out = {
+      version: 1,
+      animal_id: state.scene.animal_id,
+      session: state.scene.session,
+      frame: 'cell_um',
+      source: 'manual_register_tiff.html',
+      exported_at: new Date().toISOString(),
+      axis_note: 'Transforms map stage_um (FOV) -> cell_um',
+      fov_transforms,
+    };
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `manual_registration_${state.scene.animal_id}_${state.scene.session}.json`;
+    a.click();
+  };
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowUp') {
+      const sl = document.getElementById('zSlider');
+      sl.value = Math.min(+sl.max, +sl.value + 1);
+      sl.dispatchEvent(new Event('input'));
+    }
+    if (e.key === 'ArrowDown') {
+      const sl = document.getElementById('zSlider');
+      sl.value = Math.max(+sl.min, +sl.value - 1);
+      sl.dispatchEvent(new Event('input'));
+    }
+  });
+
+  async function waitForScene() {
+    for (let i = 0; i < 600; i++) {
+      const resp = await fetch('/api/scene');
+      const data = await resp.json();
+      if (data.loading) {
+        statusEl.textContent = data.message || 'Loading scene…';
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      if (!resp.ok || data.error) throw new Error(data.error || 'Scene load failed');
+      return data;
+    }
+    throw new Error('Scene load timeout — check the server window for errors');
+  }
+
+  async function init() {
+    try {
+      statusEl.textContent = 'Connecting…';
+      state.scene = await waitForScene();
+      const cell = state.scene.cell;
+      if (!cell.tiff_stack) throw new Error('whole-cell TIFF missing in config');
+
+      for (const [id, fov] of Object.entries(state.scene.fovs)) {
+        state.fovColors[id] = fov.color;
+        applyInitialPlacement(id);
+      }
+
+      const zSl = document.getElementById('zSlider');
+      zSl.max = Math.max(0, (cell.n_pages || 1) - 1);
+      zSl.value = Math.floor((cell.n_pages || 1) / 2);
+      state.zPage = +zSl.value;
+      document.getElementById('zVal').textContent = `${state.zPage + 1} / ${cell.n_pages}`;
+
+      refreshFovList();
+      const fovs = Object.keys(state.fovMatrices).sort();
+      if (fovs.length) selectFov(fovs[0]);
+
+      resize();
+      fitView();
+      document.getElementById('zSlider').disabled = false;
+      statusEl.textContent = 'Loading Z slice…';
+      await loadBackground();
+      statusEl.textContent = `${state.scene.animal_id} · ${cell.n_pages} Z · ${fovs.length} FOVs · MIP builds in background`;
+      document.getElementById('exportBtn').disabled = false;
+    } catch (err) {
+      statusEl.textContent = err.message;
+      statusEl.style.color = '#ff6b6b';
+    }
+  }
+
+  window.addEventListener('resize', () => { resize(); fitView(); });
+  loop();
+  init();
+  </script>
+</body>
+</html>

@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TreeAnalysis — 3D Manual Registration</title>
+  <style>
+    :root {
+      --bg: #141414;
+      --panel: #1c1c1c;
+      --border: #333;
+      --text: #e4e4e4;
+      --muted: #888;
+      --accent: #599ce7;
+      --cell: #666;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      overflow: hidden;
+    }
+    aside {
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      padding: 14px;
+      overflow-y: auto;
+      font-size: 13px;
+    }
+    h1 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 16px 0 8px; }
+    p.hint { color: var(--muted); font-size: 12px; line-height: 1.45; margin-bottom: 10px; }
+    label { display: block; margin: 8px 0 4px; color: var(--muted); font-size: 11px; }
+    input[type="file"], input[type="range"], select, button {
+      width: 100%;
+      font: inherit;
+    }
+    input[type="range"] { accent-color: var(--accent); }
+    button {
+      background: var(--accent);
+      color: #111;
+      border: none;
+      border-radius: 4px;
+      padding: 8px 10px;
+      cursor: pointer;
+      font-weight: 600;
+      margin-top: 6px;
+    }
+    button.secondary { background: #333; color: var(--text); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .row { display: flex; gap: 6px; align-items: center; }
+    .row button { flex: 1; margin-top: 0; }
+    .fov-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 8px; border-radius: 4px; cursor: pointer;
+      border: 1px solid transparent; margin-bottom: 4px;
+    }
+    .fov-item:hover { background: #252525; }
+    .fov-item.active { border-color: var(--accent); background: #222; }
+    .swatch { width: 12px; height: 12px; border-radius: 2px; flex-shrink: 0; }
+    .val { float: right; color: var(--text); }
+    #viewport { position: relative; background: #0a0a0a; }
+    #hud {
+      position: absolute; top: 10px; left: 10px;
+      background: rgba(0,0,0,0.55); padding: 8px 10px; border-radius: 4px;
+      font-size: 11px; color: var(--muted); pointer-events: none; line-height: 1.5;
+    }
+    .kbd { background: #333; padding: 1px 5px; border-radius: 3px; color: #ccc; }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>3D Manual Registration</h1>
+    <p class="hint">Align each FOV skeleton onto the whole-cell trace. Export JSON → Python pipeline.</p>
+
+    <h2>1 · Load data</h2>
+    <label>Scene JSON (recommended — from export_registration_scene.py)</label>
+    <input type="file" id="sceneFile" accept=".json" />
+    <label style="margin-top:10px">Or: whole-cell SWC (pixels)</label>
+    <input type="file" id="cellSwc" accept=".swc" />
+    <label>FOV SWC files (multi-select)</label>
+    <input type="file" id="fovSwcs" accept=".swc" multiple />
+
+    <h2>2 · Z slice (clipping)</h2>
+    <label>Slice centre (depth µm) <span class="val" id="zCenterVal">—</span></label>
+    <input type="range" id="zCenter" min="0" max="500" step="1" value="250" />
+    <label>Slice thickness (µm) <span class="val" id="zThickVal">20</span></label>
+    <input type="range" id="zThickness" min="2" max="80" step="1" value="20" />
+    <label><input type="checkbox" id="zClipOn" checked /> Enable Z clipping</label>
+
+    <h2>3 · FOV selection</h2>
+    <div id="fovList"></div>
+    <div class="row" style="margin-top:8px">
+      <button class="secondary" id="modeTranslate">Move (T)</button>
+      <button class="secondary" id="modeRotate">Rotate (R)</button>
+    </div>
+    <button class="secondary" id="resetFov">Reset selected FOV transform</button>
+
+    <h2>4 · Fine adjust (µm / deg)</h2>
+    <div id="nudgePanel" style="display:none">
+      <label>ΔX <span class="val" id="nx">0</span></label>
+      <input type="range" id="nudgeX" min="-200" max="200" step="1" value="0" />
+      <label>ΔY <span class="val" id="ny">0</span></label>
+      <input type="range" id="nudgeY" min="-200" max="200" step="1" value="0" />
+      <label>ΔZ (depth) <span class="val" id="nz">0</span></label>
+      <input type="range" id="nudgeZ" min="-200" max="200" step="1" value="0" />
+      <label>Scale <span class="val" id="nudgeS">1.00</span></label>
+      <input type="range" id="nudgeScale" min="50" max="200" step="1" value="100" />
+    </div>
+
+    <h2>5 · Export</h2>
+    <button id="exportBtn">Download manual_registration.json</button>
+    <p class="hint" style="margin-top:8px">Set <code>manual_registration</code> in GP04.json, then re-run <code>run_tree_analysis.py</code>.</p>
+  </aside>
+
+  <div id="viewport">
+    <div id="hud">
+      <span class="kbd">Left drag</span> orbit &nbsp;
+      <span class="kbd">Right drag</span> pan &nbsp;
+      <span class="kbd">Scroll</span> zoom<br>
+      <span class="kbd">T</span> translate &nbsp;
+      <span class="kbd">R</span> rotate gizmo
+    </div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module">
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import { TransformControls } from 'three/addons/controls/TransformControls.js';
+
+  // --- Coordinate convention ---
+  // API / pipeline: (x_um, y_um, z_um)
+  // Three.js scene:  X = x_um,  Y = z_um (depth),  Z = -y_um
+  const API_TO_THREE = new THREE.Matrix4().set(
+    1, 0, 0, 0,
+    0, 0, 1, 0,
+    0,-1, 0, 0,
+    0, 0, 0, 1
+  );
+  const THREE_TO_API = API_TO_THREE.clone().invert();
+
+  function apiToThree(x, y, z) {
+    return new THREE.Vector3(x, z, -y);
+  }
+
+  function threeToApi(v) {
+    const p = new THREE.Vector3(v.x, v.y, v.z);
+    p.applyMatrix4(THREE_TO_API);
+    return p;
+  }
+
+  function threeMatrixToApi(m4) {
+    const out = new THREE.Matrix4();
+    out.multiplyMatrices(THREE_TO_API, m4);
+    out.multiply(API_TO_THREE);
+    return out;
+  }
+
+  // --- SWC parser (pixels; optional simple calibration) ---
+  function parseSWC(text) {
+    const nodes = [];
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const p = t.split(/\s+/);
+      if (p.length !== 7) continue;
+      nodes.push({ n: +p[0], x: +p[2], y: +p[3], z: +p[4], parent: +p[6] });
+    }
+    return nodes;
+  }
+
+  function swcToSegments(nodes, calibrateFn) {
+    const map = new Map(nodes.map(n => [n.n, n]));
+    const segs = [];
+    for (const n of nodes) {
+      if (n.parent === -1 || !map.has(n.parent)) continue;
+      const p = map.get(n.parent);
+      const a = calibrateFn(p.x, p.y, p.z);
+      const b = calibrateFn(n.x, n.y, n.z);
+      segs.push([a, b]);
+    }
+    return segs;
+  }
+
+  // --- Scene state ---
+  const state = {
+    meta: { animal_id: 'unknown', session: 'unknown' },
+    fovGroups: {},   // fovId -> THREE.Group
+    fovColors: {},
+    selectedFov: null,
+    cellGroup: null,
+    zClipOn: true,
+    zCenter: 250,
+    zThickness: 20,
+    clipPlanes: [],
+  };
+
+  const FOV_PALETTE = ['#7B64B8','#1F8A65','#E8C030','#C85898','#2E79B5','#F0A040','#2A9A8A','#C06028'];
+
+  // --- Three.js setup ---
+  const viewport = document.getElementById('viewport');
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+  renderer.setClearColor(0x0a0a0a);
+  renderer.localClippingEnabled = true;
+  viewport.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(50, viewport.clientWidth / viewport.clientHeight, 0.1, 50000);
+  camera.position.set(400, 300, 400);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+
+  const transformControls = new TransformControls(camera, renderer.domElement);
+  transformControls.setSpace('local');
+  scene.add(transformControls);
+
+  transformControls.addEventListener('dragging-changed', (e) => {
+    controls.enabled = !e.value;
+  });
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+  dir.position.set(200, 400, 100);
+  scene.add(dir);
+
+  // --- Geometry builders ---
+  function buildLineSegments(segs, color, opacity = 1.0) {
+    const positions = [];
+    for (const [a, b] of segs) {
+      const va = apiToThree(a[0], a[1], a[2]);
+      const vb = apiToThree(b[0], b[1], b[2]);
+      positions.push(va.x, va.y, va.z, vb.x, vb.y, vb.z);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    const mat = new THREE.LineBasicMaterial({
+      color, transparent: opacity < 1, opacity,
+      clippingPlanes: state.clipPlanes,
+      clipIntersection: true,
+    });
+    return new THREE.LineSegments(geo, mat);
+  }
+
+  function updateClipPlanes() {
+    const half = state.zThickness / 2;
+    const lo = state.zCenter - half;
+    const hi = state.zCenter + half;
+    // Keep points where lo <= z_um <= hi  →  in Three Y = z_um
+    state.clipPlanes.length = 0;
+    if (state.zClipOn) {
+      state.clipPlanes.push(new THREE.Plane(new THREE.Vector3(0, -1, 0), lo));   // clip Y < lo
+      state.clipPlanes.push(new THREE.Plane(new THREE.Vector3(0, 1, 0), -hi));    // clip Y > hi
+    }
+    scene.traverse(obj => {
+      if (obj.material && obj.material.clippingPlanes !== undefined) {
+        obj.material.clippingPlanes = state.clipPlanes;
+        obj.material.clipIntersection = state.zClipOn;
+        obj.material.needsUpdate = true;
+      }
+    });
+    document.getElementById('zCenterVal').textContent = state.zCenter.toFixed(0);
+    document.getElementById('zThickVal').textContent = state.zThickness.toFixed(0);
+  }
+
+  function fitCamera(segs) {
+    if (!segs.length) return;
+    const box = new THREE.Box3();
+    for (const [a, b] of segs) {
+      box.expandByPoint(apiToThree(a[0], a[1], a[2]));
+      box.expandByPoint(apiToThree(b[0], b[1], b[2]));
+    }
+    const c = box.getCenter(new THREE.Vector3());
+    const s = box.getSize(new THREE.Vector3()).length();
+    controls.target.copy(c);
+    camera.position.copy(c.clone().add(new THREE.Vector3(s * 0.5, s * 0.3, s * 0.5)));
+    controls.update();
+  }
+
+  function loadCellSegments(segs) {
+    if (state.cellGroup) scene.remove(state.cellGroup);
+    state.cellGroup = new THREE.Group();
+    state.cellGroup.name = 'cell';
+    state.cellGroup.add(buildLineSegments(segs, 0x666666, 0.85));
+    scene.add(state.cellGroup);
+    fitCamera(segs);
+    if (segs.length) {
+      const zs = segs.flatMap(s => [s[0][2], s[1][2]]);
+      state.zCenter = (Math.min(...zs) + Math.max(...zs)) / 2;
+      document.getElementById('zCenter').min = Math.floor(Math.min(...zs));
+      document.getElementById('zCenter').max = Math.ceil(Math.max(...zs));
+      document.getElementById('zCenter').value = state.zCenter;
+      updateClipPlanes();
+    }
+  }
+
+  function addFovGroup(fovId, segs, color) {
+    if (state.fovGroups[fovId]) {
+      scene.remove(state.fovGroups[fovId]);
+    }
+    const g = new THREE.Group();
+    g.name = fovId;
+    g.userData.fovId = fovId;
+    g.add(buildLineSegments(segs, color, 1.0));
+    state.fovGroups[fovId] = g;
+    state.fovColors[fovId] = color;
+    scene.add(g);
+    refreshFovList();
+  }
+
+  function refreshFovList() {
+    const el = document.getElementById('fovList');
+    el.innerHTML = '';
+    for (const fovId of Object.keys(state.fovGroups).sort()) {
+      const div = document.createElement('div');
+      div.className = 'fov-item' + (state.selectedFov === fovId ? ' active' : '');
+      div.innerHTML = `<span class="swatch" style="background:${state.fovColors[fovId]}"></span><span>${fovId}</span>`;
+      div.onclick = () => selectFov(fovId);
+      el.appendChild(div);
+    }
+    document.getElementById('nudgePanel').style.display = state.selectedFov ? 'block' : 'none';
+  }
+
+  function selectFov(fovId) {
+    state.selectedFov = fovId;
+    refreshFovList();
+    transformControls.attach(state.fovGroups[fovId]);
+  }
+
+  // --- Load scene JSON ---
+  document.getElementById('sceneFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const data = JSON.parse(await file.text());
+    state.meta.animal_id = data.animal_id || 'unknown';
+    state.meta.session = data.session || 'unknown';
+    loadCellSegments(data.cell.segments);
+    let i = 0;
+    for (const [fovId, fov] of Object.entries(data.fovs || {})) {
+      addFovGroup(fovId, fov.segments, fov.color || FOV_PALETTE[i++ % FOV_PALETTE.length]);
+    }
+    if (Object.keys(state.fovGroups).length) selectFov(Object.keys(state.fovGroups).sort()[0]);
+  });
+
+  // --- Load raw SWCs (identity calibration — user must export scene for real µm) ---
+  document.getElementById('cellSwc').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const nodes = parseSWC(await file.text());
+    const segs = swcToSegments(nodes, (x, y, z) => [x, y, z]);
+    loadCellSegments(segs);
+  });
+
+  document.getElementById('fovSwcs').addEventListener('change', async (e) => {
+    const files = [...e.target.files];
+    let i = 0;
+    for (const file of files) {
+      const nodes = parseSWC(await file.text());
+      const segs = swcToSegments(nodes, (x, y, z) => [x, y, z]);
+      const fovId = `fov${++i}`;
+      addFovGroup(fovId, segs, FOV_PALETTE[(i - 1) % FOV_PALETTE.length]);
+    }
+    if (state.selectedFov === null && Object.keys(state.fovGroups).length)
+      selectFov(Object.keys(state.fovGroups).sort()[0]);
+  });
+
+  // --- Z clipping UI ---
+  document.getElementById('zCenter').addEventListener('input', (e) => {
+    state.zCenter = +e.target.value;
+    updateClipPlanes();
+  });
+  document.getElementById('zThickness').addEventListener('input', (e) => {
+    state.zThickness = +e.target.value;
+    updateClipPlanes();
+  });
+  document.getElementById('zClipOn').addEventListener('change', (e) => {
+    state.zClipOn = e.target.checked;
+    updateClipPlanes();
+  });
+
+  // --- Transform modes ---
+  document.getElementById('modeTranslate').onclick = () => transformControls.setMode('translate');
+  document.getElementById('modeRotate').onclick = () => transformControls.setMode('rotate');
+  document.getElementById('resetFov').onclick = () => {
+    if (!state.selectedFov) return;
+    const g = state.fovGroups[state.selectedFov];
+    g.position.set(0, 0, 0);
+    g.rotation.set(0, 0, 0);
+    g.scale.set(1, 1, 1);
+    g.updateMatrixWorld(true);
+  };
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 't' || e.key === 'T') transformControls.setMode('translate');
+    if (e.key === 'r' || e.key === 'R') transformControls.setMode('rotate');
+  });
+
+  // --- Export ---
+  document.getElementById('exportBtn').onclick = () => {
+    const fov_transforms = {};
+    for (const [fovId, group] of Object.entries(state.fovGroups)) {
+      group.updateMatrixWorld(true);
+      const mApi = threeMatrixToApi(group.matrixWorld.clone());
+      const cm = mApi.elements;  // Three.js column-major
+      const rm = [];
+      for (let r = 0; r < 4; r++)
+        for (let c = 0; c < 4; c++)
+          rm.push(cm[c * 4 + r]);
+      fov_transforms[fovId] = {
+        matrix4_column_major: [...cm],
+        matrix4_row_major: rm,
+      };
+    }
+
+    const out = {
+      version: 1,
+      animal_id: state.meta.animal_id,
+      session: state.meta.session,
+      frame: 'cell_um',
+      source: 'manual_register_3d.html',
+      exported_at: new Date().toISOString(),
+      axis_note: 'Transforms map stage_um (FOV) -> cell_um (x_um, y_um, z_um)',
+      fov_transforms,
+    };
+
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `manual_registration_${state.meta.animal_id}_${state.meta.session}.json`;
+    a.click();
+  };
+
+  updateClipPlanes();
+
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  window.addEventListener('resize', () => {
+    camera.aspect = viewport.clientWidth / viewport.clientHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(viewport.clientWidth, viewport.clientHeight);
+  });
+  </script>
+</body>
+</html>
