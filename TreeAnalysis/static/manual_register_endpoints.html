@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TreeAnalysis — Point Registration</title>
+  <style>
+    :root {
+      --bg: #121212; --panel: #1a1a1a; --border: #2e2e2e;
+      --text: #e8e8e8; --muted: #8a8a8a; --accent: #4a90d9; --warn: #e07040;
+      --fov-pt: #7B64B8; --cell-pt: #f0c040;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg); color: var(--text);
+      height: 100vh; display: grid;
+      grid-template-columns: 340px 1fr; overflow: hidden;
+    }
+    aside {
+      background: var(--panel); border-right: 1px solid var(--border);
+      padding: 14px; overflow-y: auto; font-size: 13px;
+    }
+    h1 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    h2 {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--muted); margin: 14px 0 8px;
+    }
+    p.hint { color: var(--muted); font-size: 12px; line-height: 1.45; margin-bottom: 8px; }
+    label { display: block; margin: 8px 0 4px; color: var(--muted); font-size: 11px; }
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+    button {
+      width: 100%; font: inherit; background: var(--accent); color: #fff;
+      border: none; border-radius: 4px; padding: 8px 10px; cursor: pointer;
+      font-weight: 600; margin-top: 6px;
+    }
+    button.secondary { background: #333; color: var(--text); }
+    button.active-mode { outline: 2px solid var(--accent); }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+    .row { display: flex; gap: 6px; }
+    .row button { flex: 1; margin-top: 0; }
+    .val { float: right; color: var(--text); font-variant-numeric: tabular-nums; }
+    .fov-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 8px; border-radius: 4px; cursor: pointer;
+      border: 1px solid transparent; margin-bottom: 4px;
+    }
+    .fov-item:hover { background: #252525; }
+    .fov-item.active { border-color: var(--accent); background: #222; }
+    .fov-item.done { border-color: #3ecf8e; }
+    .swatch { width: 12px; height: 12px; border-radius: 2px; flex-shrink: 0; }
+    #pairsList { font-size: 11px; color: var(--muted); max-height: 120px; overflow-y: auto; }
+    #pairsList div { padding: 3px 0; border-bottom: 1px solid #2a2a2a; }
+    main { position: relative; background: #0a0a0a; min-width: 0; }
+    #canvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+    #hud {
+      position: absolute; top: 10px; left: 10px; z-index: 2;
+      background: rgba(0,0,0,0.65); padding: 8px 10px; border-radius: 4px;
+      font-size: 11px; color: var(--muted); line-height: 1.55; pointer-events: none;
+    }
+    #status { color: var(--warn); font-size: 12px; margin-top: 8px; min-height: 18px; }
+    code { font-size: 11px; color: #aaa; }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>Point registration</h1>
+    <p class="hint">בחרי FOV → הוא יופיע ב-<strong>slice הנוכחי</strong>. לחצי נקודה צבעונית (FOV) ואז נקודה על האפור (תא). מינימום 2 זוגות.</p>
+    <div id="status">Loading…</div>
+
+    <h2>FOV</h2>
+    <div id="fovList"></div>
+    <button class="secondary" id="btnResnapZ">Re-place FOV at current Z slice</button>
+
+    <h2>Match points</h2>
+    <p class="hint">1) לחיצה על נקודה צבעונית · 2) לחיצה על SWC אפור (או סימן צהוב)</p>
+    <button class="secondary" id="btnAddCell">+ Add cell marker (then click grey SWC)</button>
+    <button class="secondary" id="btnClearPairs">Clear pairs (this FOV)</button>
+    <div id="pairsList"></div>
+
+    <h2>Z slice</h2>
+    <label>Z page <span class="val" id="zVal">—</span></label>
+    <input type="range" id="zSlider" min="0" max="0" value="0" />
+    <label>Slab (slices) <span class="val" id="zSlabVal">3</span></label>
+    <input type="range" id="zSlab" min="1" max="15" value="3" />
+
+    <h2>Display</h2>
+    <label><input type="checkbox" id="showTiff" checked /> TIFF background</label>
+    <label><input type="checkbox" id="showFovSwc" checked /> FOV SWC lines</label>
+    <label><input type="checkbox" id="showFovPts" checked /> FOV sample points</label>
+    <label>Cell line width <span class="val" id="cellLwVal">3</span></label>
+    <input type="range" id="cellLw" min="1" max="12" value="3" />
+    <label>FOV line width <span class="val" id="fovLwVal">5</span></label>
+    <input type="range" id="fovLw" min="1" max="14" value="5" />
+    <label>FOV point density <span class="val" id="ptDensityVal">30</span></label>
+    <input type="range" id="ptDensity" min="8" max="80" value="30" />
+    <button class="secondary" id="btnFit">Fit view</button>
+
+    <button id="exportBtn" disabled>Download registration JSON</button>
+    <p class="hint"><a href="/" style="color:var(--accent)">Full SWC drag mode</a></p>
+  </aside>
+  <main>
+    <canvas id="canvas"></canvas>
+    <div id="hud">Scroll: zoom · ↑↓: Z · Match: FOV point → cell</div>
+  </main>
+
+  <script type="module">
+  if (window.location.protocol === 'file:') {
+    document.body.innerHTML = '<div style="padding:24px;color:#e8e8e8"><h1>Server required</h1><p><a href="http://127.0.0.1:8020/endpoints">http://127.0.0.1:8020/endpoints</a></p></div>';
+    throw new Error('use http server');
+  }
+
+  const state = {
+    scene: null,
+    zPage: 0,
+    zSlab: 3,
+    showTiff: true,
+    showFovSwc: true,
+    showFovPts: true,
+    cellLineWidth: 3,
+    fovLineWidth: 5,
+    pointDensity: 30,
+    bgLoading: false,
+    selectedFov: null,
+    interactMode: 'match', // 'match' | 'addCell'
+    pendingFovPt: null, // index in samplePoints
+    fovState: {},
+    fovColors: {},
+    view: { scale: 1, panX: 0, panY: 0 },
+    bgImage: null,
+    needsDraw: true,
+  };
+
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const pairsListEl = document.getElementById('pairsList');
+
+  function currentZUm() {
+    const zpp = state.scene?.cell?.z_um_per_page;
+    if (!zpp?.length) return 0;
+    return zpp[state.zPage];
+  }
+
+  function slabUm() {
+    const zpp = state.scene?.cell?.z_um_per_page;
+    if (!zpp?.length) return state.zSlab * 2;
+    const i = Math.min(state.zPage, zpp.length - 1);
+    const step = i < zpp.length - 1 ? Math.abs(zpp[i + 1] - zpp[i]) : Math.abs(zpp[i] - zpp[i - 1]);
+    return state.zSlab * step;
+  }
+
+  function visibleSlice(za, zb, zSlice, slab) {
+    const lo = zSlice - slab, hi = zSlice + slab;
+    return (za >= lo && za <= hi) || (zb >= lo && zb <= hi) || (za < lo && zb > hi);
+  }
+
+  function visibleUm(za, zb, zCenter, slab) {
+    if (zCenter == null) return true;
+    const lo = zCenter - slab, hi = zCenter + slab;
+    return (za >= lo && za <= hi) || (zb >= lo && zb <= hi) || (za < lo && zb > hi);
+  }
+
+  function applyMatrix(m, x, y, z) {
+    const e = m;
+    return [
+      e[0] * x + e[4] * y + e[8] * z + e[12],
+      e[1] * x + e[5] * y + e[9] * z + e[13],
+      e[2] * x + e[6] * y + e[10] * z + e[14],
+    ];
+  }
+
+  function matrixFromOffsetUm(dx, dy, dz) {
+    return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, dx, dy, dz, 1];
+  }
+
+  function fitRigidFromPairs(pairs) {
+    if (pairs.length < 2) return null;
+    const src = pairs.map((p) => p.fovStage);
+    const dst = pairs.map((p) => p.cellUm);
+    const n = src.length;
+    let ms = [0, 0], md = [0, 0];
+    for (let i = 0; i < n; i++) {
+      ms[0] += src[i][0]; ms[1] += src[i][1];
+      md[0] += dst[i][0]; md[1] += dst[i][1];
+    }
+    ms[0] /= n; ms[1] /= n; md[0] /= n; md[1] /= n;
+    let h00 = 0, h01 = 0, h10 = 0, h11 = 0;
+    for (let i = 0; i < n; i++) {
+      const sx = src[i][0] - ms[0], sy = src[i][1] - ms[1];
+      const tx = dst[i][0] - md[0], ty = dst[i][1] - md[1];
+      h00 += sx * tx; h01 += sx * ty; h10 += sy * tx; h11 += sy * ty;
+    }
+    const theta = Math.atan2(h10 - h01, h00 + h11);
+    const c = Math.cos(theta), s = Math.sin(theta);
+    const rax = c * ms[0] - s * ms[1];
+    const ray = s * ms[0] + c * ms[1];
+    const ttx = md[0] - rax;
+    const tty = md[1] - ray;
+    let tz = 0;
+    for (let i = 0; i < n; i++) tz += dst[i][2] - src[i][2];
+    tz /= n;
+    return [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, ttx, tty, tz, 1];
+  }
+
+  function sampleFovStagePoints(fovId) {
+    const segs = state.scene.fovs[fovId].segments;
+    const key = (p) => `${p[0].toFixed(2)},${p[1].toFixed(2)},${p[2].toFixed(2)}`;
+    const nodes = new Map();
+    for (const [a, b] of segs) {
+      nodes.set(key(a), a.slice());
+      nodes.set(key(b), b.slice());
+    }
+    let pts = [...nodes.values()];
+    const maxPts = state.pointDensity;
+    if (pts.length > maxPts) {
+      const step = Math.ceil(pts.length / maxPts);
+      pts = pts.filter((_, i) => i % step === 0);
+    }
+    return pts;
+  }
+
+  function initFovState(fovId) {
+    state.fovState[fovId] = {
+      placementMatrix: null,
+      matrix: null,
+      samplePoints: [],
+      pairs: [],
+      cellLandmarks: [],
+      landmarkSeq: 0,
+    };
+    resampleFovPoints(fovId);
+  }
+
+  function resampleFovPoints(fovId) {
+    const fs = state.fovState[fovId];
+    if (!fs) return;
+    fs.samplePoints = sampleFovStagePoints(fovId);
+    fs.pairs = [];
+    fs.matrix = null;
+    state.pendingFovPt = null;
+  }
+
+  function fovCentroidStage(fovId) {
+    const fov = state.scene.fovs[fovId];
+    if (fov.centroid_stage_um) return fov.centroid_stage_um;
+    const pts = state.fovState[fovId]?.samplePoints || [];
+    if (!pts.length) return [0, 0, 0];
+    const c = [0, 0, 0];
+    for (const p of pts) { c[0] += p[0]; c[1] += p[1]; c[2] += p[2]; }
+    return c.map((v) => v / pts.length);
+  }
+
+  function placeFovAtCurrentSlice(fovId) {
+    const fov = state.scene.fovs[fovId];
+    const off = fov.initial_offset_um || [0, 0, 0];
+    const cen = fovCentroidStage(fovId);
+    const tz = currentZUm() - cen[2];
+    state.fovState[fovId].placementMatrix = matrixFromOffsetUm(off[0], off[1], tz);
+    state.fovState[fovId].matrix = null;
+    state.pendingFovPt = null;
+    markDirty();
+  }
+
+  function getFovMatrix(fovId) {
+    const fs = state.fovState[fovId];
+    if (!fs) return null;
+    return fs.matrix || fs.placementMatrix;
+  }
+
+  function refitFov(fovId) {
+    const fs = state.fovState[fovId];
+    if (fs.pairs.length >= 2) {
+      fs.matrix = fitRigidFromPairs(fs.pairs);
+    } else {
+      fs.matrix = null;
+    }
+    refreshFovList();
+    updatePairsList();
+    markDirty();
+  }
+
+  function umToPx(um, mpp) {
+    return [um[0] / mpp[0], um[1] / mpp[1]];
+  }
+
+  function snapCellPx(wx, wy) {
+    const cell = state.scene.cell;
+    const segs = cell.segments_pixel;
+    const mpp = cell.mpp;
+    const zSlice = state.zPage + 1;
+    const slab = state.zSlab;
+    let best = null;
+    let bestD = Infinity;
+    for (const [a, b] of segs) {
+      if (!visibleSlice(a[2], b[2], zSlice, slab)) continue;
+      for (const p of [a, b]) {
+        const d = Math.hypot(p[0] - wx, p[1] - wy);
+        if (d < bestD) { bestD = d; best = p; }
+      }
+      const abx = b[0] - a[0], aby = b[1] - a[1];
+      const len2 = abx * abx + aby * aby;
+      if (len2 > 0) {
+        const t = Math.max(0, Math.min(1, ((wx - a[0]) * abx + (wy - a[1]) * aby) / len2));
+        const px = a[0] + t * abx, py = a[1] + t * aby;
+        const d = Math.hypot(px - wx, py - wy);
+        if (d < bestD) { bestD = d; best = [px, py, a[2]]; }
+      }
+    }
+    if (!best || bestD > 60) return null;
+    const zpp = cell.z_um_per_page;
+    const zi = Math.max(0, Math.min(zpp.length - 1, Math.round(best[2]) - 1));
+    const zUm = zpp[zi] ?? currentZUm();
+    return { um: [best[0] * mpp[0], best[1] * mpp[1], zUm], px: best };
+  }
+
+  function pickFovPoint(wx, wy, fovId) {
+    const m = getFovMatrix(fovId);
+    const mpp = state.scene.cell.mpp;
+    if (!m) return null;
+    const fs = state.fovState[fovId];
+    const radius = 14 / state.view.scale;
+    let best = null;
+    let bestD = Infinity;
+    fs.samplePoints.forEach((stage, idx) => {
+      const cell = applyMatrix(m, stage[0], stage[1], stage[2]);
+      const px = cell[0] / mpp[0], py = cell[1] / mpp[1];
+      const d = Math.hypot(px - wx, py - wy);
+      if (d < bestD && d < radius) { bestD = d; best = idx; }
+    });
+    return best;
+  }
+
+  function pickCellLandmark(wx, wy, fovId) {
+    const mpp = state.scene.cell.mpp;
+    const radius = 12 / state.view.scale;
+    const lm = state.fovState[fovId].cellLandmarks;
+    let best = null, bestD = Infinity;
+    for (const L of lm) {
+      const px = L.um[0] / mpp[0], py = L.um[1] / mpp[1];
+      const d = Math.hypot(px - wx, py - wy);
+      if (d < bestD && d < radius) { bestD = d; best = L; }
+    }
+    return best;
+  }
+
+  function drawSegmentsPx(segs, color, lw, clipFn) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lw;
+    ctx.lineCap = 'round';
+    ctx.globalAlpha = 0.92;
+    for (const [a, b] of segs) {
+      if (!clipFn(a[2], b[2])) continue;
+      ctx.beginPath();
+      ctx.moveTo(a[0], a[1]);
+      ctx.lineTo(b[0], b[1]);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawFovSwc(fovId) {
+    if (!state.showFovSwc) return;
+    const m = getFovMatrix(fovId);
+    if (!m) return;
+    const fov = state.scene.fovs[fovId];
+    const mpp = state.scene.cell.mpp;
+    const zCenter = currentZUm();
+    const slab = slabUm();
+    const color = state.fovColors[fovId];
+    const lw = state.fovLineWidth / state.view.scale;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lw;
+    ctx.lineCap = 'round';
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 6;
+    for (const [a, b] of fov.segments) {
+      const ca = applyMatrix(m, a[0], a[1], a[2]);
+      const cb = applyMatrix(m, b[0], b[1], b[2]);
+      if (!visibleUm(ca[2], cb[2], zCenter, slab)) continue;
+      ctx.beginPath();
+      ctx.moveTo(ca[0] / mpp[0], ca[1] / mpp[1]);
+      ctx.lineTo(cb[0] / mpp[0], cb[1] / mpp[1]);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawFovPoints(fovId) {
+    if (!state.showFovPts) return;
+    const m = getFovMatrix(fovId);
+    if (!m) return;
+    const fs = state.fovState[fovId];
+    const mpp = state.scene.cell.mpp;
+    const color = state.fovColors[fovId];
+    const matched = new Set(fs.pairs.map((p) => p.fovIdx));
+    fs.samplePoints.forEach((stage, idx) => {
+      const cell = applyMatrix(m, stage[0], stage[1], stage[2]);
+      const px = cell[0] / mpp[0], py = cell[1] / mpp[1];
+      const r = (idx === state.pendingFovPt ? 9 : matched.has(idx) ? 7 : 5) / state.view.scale;
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      if (idx === state.pendingFovPt) {
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5 / state.view.scale;
+        ctx.fill();
+        ctx.stroke();
+      } else if (matched.has(idx)) {
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1 / state.view.scale;
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = color + '88';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5 / state.view.scale;
+        ctx.fill();
+        ctx.stroke();
+      }
+      ctx.fillStyle = '#fff';
+      ctx.font = `${9 / state.view.scale}px sans-serif`;
+      ctx.fillText(String(idx + 1), px + r + 1, py + 3 / state.view.scale);
+    });
+  }
+
+  function drawCellLandmarks(fovId) {
+    const lm = state.fovState[fovId].cellLandmarks;
+    const mpp = state.scene.cell.mpp;
+    for (const L of lm) {
+      const px = L.um[0] / mpp[0], py = L.um[1] / mpp[1];
+      const r = 8 / state.view.scale;
+      ctx.fillStyle = '#f0c040';
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5 / state.view.scale;
+      ctx.beginPath();
+      ctx.rect(px - r, py - r, r * 2, r * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#000';
+      ctx.font = `bold ${9 / state.view.scale}px sans-serif`;
+      ctx.fillText(`C${L.id}`, px - r + 1, py + 3 / state.view.scale);
+    }
+  }
+
+  function drawPairLines(fovId) {
+    const fs = state.fovState[fovId];
+    const m = getFovMatrix(fovId);
+    if (!m || !fs.pairs.length) return;
+    const mpp = state.scene.cell.mpp;
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 1 / state.view.scale;
+    ctx.setLineDash([4 / state.view.scale, 4 / state.view.scale]);
+    for (const pr of fs.pairs) {
+      const f = applyMatrix(m, pr.fovStage[0], pr.fovStage[1], pr.fovStage[2]);
+      const fp = [f[0] / mpp[0], f[1] / mpp[1]];
+      const cp = [pr.cellUm[0] / mpp[0], pr.cellUm[1] / mpp[1]];
+      ctx.beginPath();
+      ctx.moveTo(fp[0], fp[1]);
+      ctx.lineTo(cp[0], cp[1]);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  function draw() {
+    if (!state.scene) return;
+    const cell = state.scene.cell;
+    const [wPx, hPx] = cell.size_px;
+    const panel = canvas.parentElement;
+    ctx.fillStyle = '#0a0a0a';
+    ctx.fillRect(0, 0, panel.clientWidth, panel.clientHeight);
+    ctx.save();
+    ctx.translate(state.view.panX, state.view.panY);
+    ctx.scale(state.view.scale, state.view.scale);
+
+    if (state.bgImage && state.showTiff) {
+      ctx.drawImage(state.bgImage, 0, 0, wPx, hPx);
+    }
+
+    const zSlice = state.zPage + 1;
+    if (cell.segments_pixel?.length) {
+      drawSegmentsPx(
+        cell.segments_pixel, '#c0c0c0',
+        state.cellLineWidth / state.view.scale,
+        (za, zb) => visibleSlice(za, zb, zSlice, state.zSlab),
+      );
+    }
+
+    if (state.selectedFov) {
+      const fid = state.selectedFov;
+      drawFovSwc(fid);
+      drawPairLines(fid);
+      drawCellLandmarks(fid);
+      drawFovPoints(fid);
+    }
+    ctx.restore();
+  }
+
+  function loop() {
+    if (state.needsDraw) { draw(); state.needsDraw = false; }
+    requestAnimationFrame(loop);
+  }
+
+  function markDirty() { state.needsDraw = true; }
+
+  async function loadBackground() {
+    if (state.bgLoading) return;
+    state.bgLoading = true;
+    try {
+      const img = new Image();
+      await new Promise((res, rej) => {
+        img.onload = res;
+        img.onerror = () => rej(new Error('slice'));
+        img.src = `/api/cell/slice/${state.zPage}.png?t=${Date.now()}`;
+      });
+      state.bgImage = img;
+      markDirty();
+    } catch (_) { /* SWC only */ }
+    state.bgLoading = false;
+  }
+
+  function fitView() {
+    const [wPx, hPx] = state.scene.cell.size_px;
+    const panel = canvas.parentElement;
+    const sx = (panel.clientWidth - 40) / wPx;
+    const sy = (panel.clientHeight - 40) / hPx;
+    state.view.scale = Math.min(sx, sy);
+    state.view.panX = (panel.clientWidth - wPx * state.view.scale) / 2;
+    state.view.panY = (panel.clientHeight - hPx * state.view.scale) / 2;
+    markDirty();
+  }
+
+  function resize() {
+    const panel = canvas.parentElement;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = panel.clientWidth * dpr;
+    canvas.height = panel.clientHeight * dpr;
+    canvas.style.width = panel.clientWidth + 'px';
+    canvas.style.height = panel.clientHeight + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    markDirty();
+  }
+
+  function allFovsDone() {
+    return Object.keys(state.fovState).every((id) => (state.fovState[id].pairs?.length || 0) >= 2 && state.fovState[id].matrix);
+  }
+
+  function refreshFovList() {
+    const el = document.getElementById('fovList');
+    el.innerHTML = '';
+    for (const id of Object.keys(state.fovState).sort()) {
+      const fs = state.fovState[id];
+      const done = fs.matrix && fs.pairs.length >= 2;
+      const div = document.createElement('div');
+      div.className = 'fov-item' + (state.selectedFov === id ? ' active' : '') + (done ? ' done' : '');
+      const n = fs.pairs.length;
+      div.innerHTML = `<span class="swatch" style="background:${state.fovColors[id]}"></span>${id} <span style="color:#666;margin-left:auto">${n} pts</span>`;
+      div.onclick = () => selectFov(id);
+      el.appendChild(div);
+    }
+    document.getElementById('exportBtn').disabled = !allFovsDone();
+  }
+
+  function updatePairsList() {
+    if (!state.selectedFov) {
+      pairsListEl.innerHTML = '';
+      return;
+    }
+    const fs = state.fovState[state.selectedFov];
+    if (!fs.pairs.length) {
+      pairsListEl.innerHTML = '<div>No pairs yet</div>';
+      return;
+    }
+    pairsListEl.innerHTML = fs.pairs.map((p, i) =>
+      `<div>#${i + 1} FOV pt ${p.fovIdx + 1} → cell ${p.cellUm.map((v) => v.toFixed(0)).join(',')}</div>`
+    ).join('');
+  }
+
+  function selectFov(id) {
+    state.selectedFov = id;
+    state.pendingFovPt = null;
+    state.interactMode = 'match';
+    document.getElementById('btnAddCell').classList.remove('active-mode');
+    placeFovAtCurrentSlice(id);
+    refreshFovList();
+    updatePairsList();
+    statusEl.textContent = `${id} at Z slice ${state.zPage + 1} — click coloured point, then grey cell`;
+    statusEl.style.color = '#e8c030';
+    markDirty();
+  }
+
+  function screenToWorld(sx, sy) {
+    return {
+      x: (sx - state.view.panX) / state.view.scale,
+      y: (sy - state.view.panY) / state.view.scale,
+    };
+  }
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 0.9 : 1.1;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    state.view.panX = mx - (mx - state.view.panX) * factor;
+    state.view.panY = my - (my - state.view.panY) * factor;
+    state.view.scale *= factor;
+    markDirty();
+  }, { passive: false });
+
+  canvas.addEventListener('click', (e) => {
+    if (!state.selectedFov) return;
+    const fid = state.selectedFov;
+    const fs = state.fovState[fid];
+    const rect = canvas.getBoundingClientRect();
+    const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+
+    if (state.interactMode === 'addCell') {
+      const snap = snapCellPx(w.x, w.y);
+      if (!snap) {
+        statusEl.textContent = 'Click closer to grey SWC';
+        return;
+      }
+      fs.landmarkSeq += 1;
+      fs.cellLandmarks.push({ id: fs.landmarkSeq, um: snap.um });
+      state.interactMode = 'match';
+      document.getElementById('btnAddCell').classList.remove('active-mode');
+      statusEl.textContent = `Cell marker C${fs.landmarkSeq} added — match a FOV point to it`;
+      markDirty();
+      return;
+    }
+
+    if (state.pendingFovPt == null) {
+      const idx = pickFovPoint(w.x, w.y, fid);
+      if (idx == null) {
+        statusEl.textContent = 'Click a coloured FOV point (numbered dot)';
+        return;
+      }
+      state.pendingFovPt = idx;
+      statusEl.textContent = `FOV point ${idx + 1} selected — now click grey SWC or yellow marker`;
+      markDirty();
+      return;
+    }
+
+    const lm = pickCellLandmark(w.x, w.y, fid);
+    let cellUm;
+    if (lm) {
+      cellUm = lm.um.slice();
+    } else {
+      const snap = snapCellPx(w.x, w.y);
+      if (!snap) {
+        statusEl.textContent = 'Click grey SWC or yellow cell marker';
+        return;
+      }
+      cellUm = snap.um;
+    }
+
+    const fovStage = fs.samplePoints[state.pendingFovPt].slice();
+    fs.pairs = fs.pairs.filter((p) => p.fovIdx !== state.pendingFovPt);
+    fs.pairs.push({ fovIdx: state.pendingFovPt, fovStage, cellUm });
+    state.pendingFovPt = null;
+    refitFov(fid);
+    statusEl.textContent = `${fid}: ${fs.pairs.length} pairs (need ≥2) — ${fs.matrix ? 'fitted ✓' : 'add more'}`;
+  });
+
+  document.getElementById('btnAddCell').onclick = () => {
+    if (!state.selectedFov) return;
+    state.interactMode = 'addCell';
+    state.pendingFovPt = null;
+    document.getElementById('btnAddCell').classList.add('active-mode');
+    statusEl.textContent = 'Click grey SWC to add yellow cell marker';
+  };
+
+  document.getElementById('btnResnapZ').onclick = () => {
+    if (!state.selectedFov) return;
+    placeFovAtCurrentSlice(state.selectedFov);
+    statusEl.textContent = `${state.selectedFov} placed at Z slice ${state.zPage + 1}`;
+  };
+
+  document.getElementById('btnClearPairs').onclick = () => {
+    if (!state.selectedFov) return;
+    const fid = state.selectedFov;
+    state.fovState[fid].pairs = [];
+    state.fovState[fid].matrix = null;
+    state.pendingFovPt = null;
+    placeFovAtCurrentSlice(fid);
+    refitFov(fid);
+  };
+
+  document.getElementById('btnFit').onclick = () => fitView();
+
+  document.getElementById('zSlider').addEventListener('input', (e) => {
+    state.zPage = +e.target.value;
+    document.getElementById('zVal').textContent = `${state.zPage + 1} / ${state.scene.cell.n_pages}`;
+    loadBackground();
+    markDirty();
+  });
+  document.getElementById('zSlab').addEventListener('input', (e) => {
+    state.zSlab = +e.target.value;
+    document.getElementById('zSlabVal').textContent = state.zSlab;
+    markDirty();
+  });
+  document.getElementById('showTiff').onchange = (e) => { state.showTiff = e.target.checked; markDirty(); };
+  document.getElementById('showFovSwc').onchange = (e) => { state.showFovSwc = e.target.checked; markDirty(); };
+  document.getElementById('showFovPts').onchange = (e) => { state.showFovPts = e.target.checked; markDirty(); };
+  document.getElementById('cellLw').oninput = (e) => {
+    state.cellLineWidth = +e.target.value;
+    document.getElementById('cellLwVal').textContent = state.cellLineWidth;
+    markDirty();
+  };
+  document.getElementById('fovLw').oninput = (e) => {
+    state.fovLineWidth = +e.target.value;
+    document.getElementById('fovLwVal').textContent = state.fovLineWidth;
+    markDirty();
+  };
+  document.getElementById('ptDensity').oninput = (e) => {
+    state.pointDensity = +e.target.value;
+    document.getElementById('ptDensityVal').textContent = state.pointDensity;
+    if (state.selectedFov) {
+      resampleFovPoints(state.selectedFov);
+      placeFovAtCurrentSlice(state.selectedFov);
+      refitFov(state.selectedFov);
+    }
+  };
+
+  document.getElementById('exportBtn').onclick = () => {
+    const fov_transforms = {};
+    const fov_point_pairs = {};
+    for (const [fovId, fs] of Object.entries(state.fovState)) {
+      if (!fs.matrix || fs.pairs.length < 2) continue;
+      const cm = fs.matrix;
+      const rm = [];
+      for (let r = 0; r < 4; r++)
+        for (let c = 0; c < 4; c++) rm.push(cm[c * 4 + r]);
+      fov_transforms[fovId] = { matrix4_column_major: [...cm], matrix4_row_major: rm };
+      fov_point_pairs[fovId] = fs.pairs.map((p) => ({
+        fov_stage_um: p.fovStage,
+        cell_um: p.cellUm,
+      }));
+    }
+    const out = {
+      version: 1,
+      animal_id: state.scene.animal_id,
+      session: state.scene.session,
+      frame: 'cell_um',
+      source: 'manual_register_points.html',
+      exported_at: new Date().toISOString(),
+      axis_note: 'Transforms from N point pairs (rigid XY + Z shift)',
+      fov_transforms,
+      fov_point_pairs,
+    };
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `manual_registration_${state.scene.animal_id}_${state.scene.session}.json`;
+    a.click();
+  };
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowUp') {
+      const sl = document.getElementById('zSlider');
+      sl.value = Math.min(+sl.max, +sl.value + 1);
+      sl.dispatchEvent(new Event('input'));
+    }
+    if (e.key === 'ArrowDown') {
+      const sl = document.getElementById('zSlider');
+      sl.value = Math.max(+sl.min, +sl.value - 1);
+      sl.dispatchEvent(new Event('input'));
+    }
+    if (e.key === 'Escape') {
+      state.pendingFovPt = null;
+      state.interactMode = 'match';
+      document.getElementById('btnAddCell').classList.remove('active-mode');
+      markDirty();
+    }
+  });
+
+  async function waitForScene() {
+    for (let i = 0; i < 600; i++) {
+      const resp = await fetch('/api/scene');
+      const data = await resp.json();
+      if (data.loading) {
+        statusEl.textContent = data.message || 'Loading…';
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      if (!resp.ok || data.error) throw new Error(data.error || 'Scene failed');
+      return data;
+    }
+    throw new Error('Timeout — check server window');
+  }
+
+  async function init() {
+    state.scene = await waitForScene();
+    const cell = state.scene.cell;
+    for (const [id, fov] of Object.entries(state.scene.fovs)) {
+      state.fovColors[id] = fov.color;
+      initFovState(id);
+    }
+    const zSl = document.getElementById('zSlider');
+    zSl.max = Math.max(0, (cell.n_pages || 1) - 1);
+    zSl.value = Math.floor((cell.n_pages || 1) / 2);
+    state.zPage = +zSl.value;
+    document.getElementById('zVal').textContent = `${state.zPage + 1} / ${cell.n_pages}`;
+    refreshFovList();
+    resize();
+    fitView();
+    window.addEventListener('resize', resize);
+    await loadBackground();
+    requestAnimationFrame(loop);
+    statusEl.textContent = 'Scroll Z, pick FOV — it snaps to your slice';
+    const ids = Object.keys(state.fovState).sort();
+    if (ids.length) selectFov(ids[0]);
+  }
+
+  init().catch((e) => { statusEl.textContent = e.message; });
+  </script>
+</body>
+</html>
